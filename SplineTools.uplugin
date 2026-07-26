@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.01",
+	"FriendlyName": "SplineTools",
+	"Description": "Spline-based procedural building and placement tools.",
+	"Category": "Gameplay",
+	"CreatedBy": "OpenAI Codex",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "SplineTools",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
