@@ -32,7 +32,12 @@ void ASplineToolActorBase::OnConstruction(const FTransform& Transform)
 	if (GetWorld() && GetWorld()->IsGameWorld())
 	{
 		RebuildSplineTool();
+		return;
 	}
+
+#if WITH_EDITOR
+	QueueEditorRebuild();
+#endif
 }
 
 void ASplineToolActorBase::RebuildSplineTool()
@@ -166,16 +171,18 @@ void ASplineToolActorBase::AddSplineInstance(
 void ASplineToolActorBase::PostEditMove(bool bFinished)
 {
 	Super::PostEditMove(bFinished);
-
-	if (bFinished)
-	{
-		QueueEditorRebuild();
-	}
+	QueueEditorRebuild();
 }
 
 void ASplineToolActorBase::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
+	QueueEditorRebuild();
+}
+
+void ASplineToolActorBase::PostEditUndo()
+{
+	Super::PostEditUndo();
 	QueueEditorRebuild();
 }
 

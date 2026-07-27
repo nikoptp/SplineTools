@@ -15,13 +15,16 @@ Developed in an Unreal Engine 5.4 project.
   optional terrain snapping.
 - `ARopeBridge` creates physics-enabled bridge sections and constraints along a
   spline.
+- `AProceduralRoadActor` generates terrain-conforming road surfaces with
+  world-uniform UVs, open bottoms, tucked terrain side flaps, convex collision,
+  and optional spline-spaced decals.
 - Tools rebuild during construction and expose call-in-editor rebuild actions.
 
 ## Requirements
 
 - Unreal Engine 5.4 or a compatible later version.
-- Runtime module dependencies: `Core`, `CoreUObject`, `Engine`, and
-  `PhysicsCore`.
+- Runtime module dependencies: `Core`, `CoreUObject`, `Engine`,
+  `ProceduralMeshComponent`, and `PhysicsCore`.
 - The plugin is code-only and requires a C++ toolchain.
 - Meshes are supplied by the host project.
 
@@ -56,6 +59,26 @@ Generated wall and tower meshes use hierarchical instancing.
 
 The first and last parts can be anchored while intermediate sections simulate
 physics.
+
+## Procedural Road Quick Start
+
+1. Place `AProceduralRoadActor` in a level and edit its spline.
+2. Assign a road material and set road width, segment length, and width
+   subdivisions.
+3. Keep terrain alignment enabled to project every cross-section sample onto
+   the landscape. Tune the trace range and surface offset if needed.
+4. Tune side-flap width and embed depth so the open-bottom mesh meets uneven
+   terrain without exposing gaps.
+5. Enable simple collision to create grouped convex prisms along the surface.
+6. Optionally assign a decal material and enable decal generation for spline-
+   aligned markings or wear.
+
+The road rebuilds after spline and property edits. UVs are based on world
+distance across and along the road, so material density remains uniform when
+segment lengths change. Road geometry is divided into moderately long,
+configurable chunks. Editor rebuilds hash the sampled geometry and only replace
+chunks affected by the spline edit; unchanged mesh and collision components are
+retained.
 
 ## Extending the Plugin
 

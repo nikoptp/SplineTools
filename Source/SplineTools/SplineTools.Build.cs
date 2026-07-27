@@ -11,7 +11,8 @@ public class SplineTools : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
-				"Engine"
+				"Engine",
+				"ProceduralMeshComponent"
 			}
 		);
 

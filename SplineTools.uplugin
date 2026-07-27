@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "0.01",
+	"Version": 2,
+	"VersionName": "0.02",
 	"FriendlyName": "SplineTools",
 	"Description": "Spline-based procedural building and placement tools.",
 	"Category": "Gameplay",
@@ -14,6 +14,12 @@
 	"IsBetaVersion": false,
 	"IsExperimentalVersion": false,
 	"Installed": false,
+	"Plugins": [
+		{
+			"Name": "ProceduralMeshComponent",
+			"Enabled": true
+		}
+	],
 	"Modules": [
 		{
 			"Name": "SplineTools",

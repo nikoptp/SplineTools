@@ -60,6 +60,7 @@ private:
 public:
 	virtual void PostEditMove(bool bFinished) override;
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	virtual void PostEditUndo() override;
 
 private:
 	void QueueEditorRebuild();
