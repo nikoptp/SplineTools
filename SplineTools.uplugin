@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 3,
-	"VersionName": "0.03",
+	"Version": 8,
+	"VersionName": "0.08",
 	"FriendlyName": "SplineTools",
 	"Description": "Spline-based procedural building and placement tools.",
 	"Category": "Gameplay",

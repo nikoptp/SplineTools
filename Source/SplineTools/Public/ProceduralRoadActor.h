@@ -41,6 +41,31 @@ struct SPLINETOOLS_API FProceduralRoadSplinePoint
 	TEnumAsByte<ESplinePointType::Type> Type = ESplinePointType::Curve;
 };
 
+/** Exact generated geometry at a road end used to form a gap-free junction seam. */
+USTRUCT(BlueprintType)
+struct SPLINETOOLS_API FProceduralRoadJunctionEdgeGeometry
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Road")
+	TArray<FVector> SurfacePoints;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Road")
+	FVector LeftFlapPoint = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Road")
+	FVector RightFlapPoint = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Road")
+	FVector Direction = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Road")
+	bool bHasSideFlaps = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Road")
+	bool bUsesCachedMesh = false;
+};
+
 UCLASS(BlueprintType)
 class SPLINETOOLS_API AProceduralRoadActor : public ASplineToolActorBase
 {
@@ -61,6 +86,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Road|Material")
 	UMaterialInterface* GetRoadMaterial() const;
 
+	UFUNCTION(BlueprintPure, Category = "Road|Material")
+	UMaterialInterface* GetRoadSideFlapMaterial() const;
+
 	bool SetJunctionTrim(
 		ERoadSplineEndpoint Endpoint,
 		float TrimDistance,
@@ -73,6 +101,19 @@ public:
 		FVector& OutLeft,
 		FVector& OutRight,
 		FVector& OutDirection) const;
+	bool GetJunctionEdgeSamples(
+		ERoadSplineEndpoint Endpoint,
+		float TrimDistance,
+		TArray<FVector>& OutEdgePoints,
+		FVector& OutDirection) const;
+	bool GetJunctionEdgeGeometry(
+		ERoadSplineEndpoint Endpoint,
+		float TrimDistance,
+		FProceduralRoadJunctionEdgeGeometry& OutGeometry) const;
+	float GetRoadSplineLength() const;
+	bool GetJunctionTrimDistance(
+		ERoadSplineEndpoint Endpoint,
+		float& OutTrimDistance) const;
 	bool GetSplineEndpointLocation(
 		ERoadSplineEndpoint Endpoint,
 		FVector& OutLocation) const;

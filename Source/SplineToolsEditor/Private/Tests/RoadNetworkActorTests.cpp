@@ -2,11 +2,13 @@
 
 #include "Misc/AutomationTest.h"
 
+#include "Components/BoxComponent.h"
 #include "Editor.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
 #include "ProceduralRoadActor.h"
 #include "ProceduralRoadJunctionActor.h"
+#include "ProceduralMeshComponent.h"
 #include "RoadNetworkActor.h"
 #include "Tests/RoadNetworkTestTypes.h"
 
@@ -58,6 +60,34 @@ namespace
 	private:
 		UWorld* World = nullptr;
 	};
+
+	void CaptureRoadEndpointVertices(
+		UWorld* World,
+		TMap<FName, TArray<FVector>>& OutVertices)
+	{
+		OutVertices.Reset();
+		for (TActorIterator<AProceduralRoadActor> RoadIterator(World);
+			RoadIterator;
+			++RoadIterator)
+		{
+			AProceduralRoadActor* Road = *RoadIterator;
+			TArray<FVector>& RoadVertices = OutVertices.FindOrAdd(Road->GetFName());
+			for (ERoadSplineEndpoint Endpoint :
+				{ERoadSplineEndpoint::Start, ERoadSplineEndpoint::End})
+			{
+				float TrimDistance = 0.0f;
+				Road->GetJunctionTrimDistance(Endpoint, TrimDistance);
+				FProceduralRoadJunctionEdgeGeometry Geometry;
+				if (Road->GetJunctionEdgeGeometry(
+					Endpoint,
+					TrimDistance,
+					Geometry))
+				{
+					RoadVertices.Append(Geometry.SurfacePoints);
+				}
+			}
+		}
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -171,6 +201,199 @@ bool FRoadPaintCrossingTest::RunTest(const FString& Parameters)
 	if (Junction)
 	{
 		TestEqual(TEXT("Junction owns four exact endpoints"), Junction->GetRoadConnections().Num(), 4);
+		UProceduralMeshComponent* JunctionMesh =
+			Junction->FindComponentByClass<UProceduralMeshComponent>();
+		TestNotNull(TEXT("Junction has a procedural mesh"), JunctionMesh);
+		if (JunctionMesh)
+		{
+			const FProcMeshSection* SurfaceSection = JunctionMesh->GetProcMeshSection(0);
+			const FProcMeshSection* BlendSection = JunctionMesh->GetProcMeshSection(1);
+			TestNotNull(TEXT("Junction has a terrain-sampled surface section"), SurfaceSection);
+			TestNotNull(TEXT("Junction has a ground-blend skirt section"), BlendSection);
+			if (SurfaceSection)
+			{
+				TestTrue(
+					TEXT("Junction surface contains intermediate terrain samples"),
+					SurfaceSection->ProcVertexBuffer.Num() > 13);
+			}
+			if (SurfaceSection && BlendSection)
+			{
+				for (const FProceduralRoadJunctionConnection& Connection :
+					Junction->GetRoadConnections())
+				{
+					float TrimDistance = 0.0f;
+					Connection.Road->GetJunctionTrimDistance(
+						Connection.Endpoint,
+						TrimDistance);
+					FProceduralRoadJunctionEdgeGeometry EdgeGeometry;
+					TestTrue(
+						TEXT("Road exposes its generated junction edge"),
+						Connection.Road->GetJunctionEdgeGeometry(
+							Connection.Endpoint,
+							TrimDistance,
+							EdgeGeometry));
+					TestTrue(
+						TEXT("Junction edge comes from the cached road mesh"),
+						EdgeGeometry.bUsesCachedMesh);
+					for (const FVector& SurfacePoint : EdgeGeometry.SurfacePoints)
+					{
+						bool bFoundSurfacePoint = false;
+						for (const FProcMeshVertex& JunctionVertex :
+							SurfaceSection->ProcVertexBuffer)
+						{
+							const FVector JunctionWorldPosition =
+								JunctionMesh->GetComponentTransform().TransformPosition(
+									JunctionVertex.Position);
+							if (JunctionWorldPosition.Equals(SurfacePoint, 0.01f))
+							{
+								bFoundSurfacePoint = true;
+								break;
+							}
+						}
+						TestTrue(
+							TEXT("Junction surface reuses an exact road endpoint vertex"),
+							bFoundSurfacePoint);
+					}
+					for (int32 EdgePointIndex = 0;
+						EdgePointIndex + 1 < EdgeGeometry.SurfacePoints.Num();
+						++EdgePointIndex)
+					{
+						bool bSkirtCrossesRoadMouth = false;
+						for (int32 TriangleIndex = 0;
+							TriangleIndex + 2 < BlendSection->ProcIndexBuffer.Num();
+							TriangleIndex += 3)
+						{
+							bool bContainsFirstPoint = false;
+							bool bContainsSecondPoint = false;
+							for (int32 CornerIndex = 0; CornerIndex < 3; ++CornerIndex)
+							{
+								const int32 VertexIndex =
+									BlendSection->ProcIndexBuffer[TriangleIndex + CornerIndex];
+								const FVector JunctionWorldPosition =
+									JunctionMesh->GetComponentTransform().TransformPosition(
+										BlendSection->ProcVertexBuffer[VertexIndex].Position);
+								bContainsFirstPoint |= JunctionWorldPosition.Equals(
+									EdgeGeometry.SurfacePoints[EdgePointIndex],
+									0.01f);
+								bContainsSecondPoint |= JunctionWorldPosition.Equals(
+									EdgeGeometry.SurfacePoints[EdgePointIndex + 1],
+									0.01f);
+							}
+							bSkirtCrossesRoadMouth |=
+								bContainsFirstPoint && bContainsSecondPoint;
+						}
+						TestFalse(
+							TEXT("Junction skirt leaves the road mouth open"),
+							bSkirtCrossesRoadMouth);
+					}
+					if (EdgeGeometry.bHasSideFlaps)
+					{
+						bool bFoundLeftFlap = false;
+						bool bFoundRightFlap = false;
+						for (const FProcMeshVertex& JunctionVertex :
+							BlendSection->ProcVertexBuffer)
+						{
+							const FVector JunctionWorldPosition =
+								JunctionMesh->GetComponentTransform().TransformPosition(
+									JunctionVertex.Position);
+							bFoundLeftFlap |= JunctionWorldPosition.Equals(
+								EdgeGeometry.LeftFlapPoint,
+								0.01f);
+							bFoundRightFlap |= JunctionWorldPosition.Equals(
+								EdgeGeometry.RightFlapPoint,
+								0.01f);
+						}
+						TestTrue(
+							TEXT("Junction skirt reuses the road's left flap vertex"),
+							bFoundLeftFlap);
+						TestTrue(
+							TEXT("Junction skirt reuses the road's right flap vertex"),
+							bFoundRightFlap);
+					}
+				}
+			}
+		}
+
+		AActor* TerrainDepression =
+			Network->GetWorld()->SpawnActor<AActor>();
+		TerrainDepression->SetActorLocation(FVector(0.0f, 0.0f, -500.0f));
+		UBoxComponent* DepressionCollision = NewObject<UBoxComponent>(
+			TerrainDepression,
+			TEXT("TerrainDepressionCollision"));
+		TerrainDepression->SetRootComponent(DepressionCollision);
+		DepressionCollision->SetBoxExtent(FVector(100.0f, 100.0f, 10.0f));
+		DepressionCollision->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		DepressionCollision->SetCollisionObjectType(ECC_WorldStatic);
+		DepressionCollision->SetCollisionResponseToAllChannels(ECR_Ignore);
+		DepressionCollision->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+		DepressionCollision->RegisterComponent();
+		Junction->RebuildJunctionMesh();
+
+		UProceduralMeshComponent* SupportedJunctionMesh =
+			Junction->FindComponentByClass<UProceduralMeshComponent>();
+		const FProcMeshSection* SupportedSurfaceSection =
+			SupportedJunctionMesh
+				? SupportedJunctionMesh->GetProcMeshSection(0)
+				: nullptr;
+		TestNotNull(
+			TEXT("Road-supported junction surface remains generated"),
+			SupportedSurfaceSection);
+		if (SupportedJunctionMesh
+			&& SupportedSurfaceSection
+			&& !SupportedSurfaceSection->ProcVertexBuffer.IsEmpty())
+		{
+			const FVector SupportedCenter =
+				SupportedJunctionMesh->GetComponentTransform().TransformPosition(
+					SupportedSurfaceSection->ProcVertexBuffer[0].Position);
+			TestTrue(
+				TEXT("Terrain depression cannot collapse the road-supported center"),
+				FMath::IsNearlyZero(SupportedCenter.Z, 1.0f));
+		}
+
+		TMap<FName, TArray<FVector>> InitialRoadVertices;
+		CaptureRoadEndpointVertices(Network->GetWorld(), InitialRoadVertices);
+		SupportedJunctionMesh->ClearAllMeshSections();
+		Network->RebuildDirty();
+		TestNotNull(
+			TEXT("Explicit dirty rebuild refreshes the junction cache"),
+			SupportedJunctionMesh->GetProcMeshSection(0));
+		Network->RebuildAll();
+		Network->RebuildAll();
+
+		TMap<FName, TArray<FVector>> RebuiltRoadVertices;
+		CaptureRoadEndpointVertices(Network->GetWorld(), RebuiltRoadVertices);
+		TestEqual(
+			TEXT("Repeated rebuild preserves the managed road actor count"),
+			RebuiltRoadVertices.Num(),
+			InitialRoadVertices.Num());
+		for (const TPair<FName, TArray<FVector>>& InitialRoad : InitialRoadVertices)
+		{
+			const TArray<FVector>* RebuiltVertices =
+				RebuiltRoadVertices.Find(InitialRoad.Key);
+			TestNotNull(
+				TEXT("Repeated rebuild preserves each managed road actor"),
+				RebuiltVertices);
+			if (!RebuiltVertices)
+			{
+				continue;
+			}
+			TestEqual(
+				TEXT("Repeated rebuild preserves road endpoint vertex count"),
+				RebuiltVertices->Num(),
+				InitialRoad.Value.Num());
+			for (int32 VertexIndex = 0;
+				VertexIndex < FMath::Min(
+					RebuiltVertices->Num(),
+					InitialRoad.Value.Num());
+				++VertexIndex)
+			{
+				TestTrue(
+					TEXT("Repeated rebuild is geometrically idempotent"),
+					(*RebuiltVertices)[VertexIndex].Equals(
+						InitialRoad.Value[VertexIndex],
+						0.01f));
+			}
+		}
 	}
 	return true;
 }
@@ -348,6 +571,68 @@ bool FRoadPaintPartialAdoptionTest::RunTest(const FString& Parameters)
 		Network->AdoptSelectedRoads());
 	TestEqual(TEXT("Rejected adoption leaves graph unchanged"), Network->GetLinks().Num(), 0);
 	GEditor->SelectNone(false, true, false);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRoadPaintNearbyJunctionTrimTest,
+	"SplineTools.RoadPainting.BudgetsTrimBetweenNearbyJunctions",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadPaintNearbyJunctionTrimTest::RunTest(const FString& Parameters)
+{
+	FScopedRoadTestWorld TestWorld;
+	ARoadNetworkActor* Network = TestWorld.SpawnNetwork();
+	AProceduralRoadActor* Road = Network->GetWorld()->SpawnActor<AProceduralRoadActor>();
+	TArray<FProceduralRoadSplinePoint> RoadPoints;
+	FProceduralRoadSplinePoint& StartPoint = RoadPoints.AddDefaulted_GetRef();
+	StartPoint.WorldLocation = FVector::ZeroVector;
+	StartPoint.Type = ESplinePointType::Linear;
+	FProceduralRoadSplinePoint& EndPoint = RoadPoints.AddDefaulted_GetRef();
+	EndPoint.WorldLocation = FVector(500.0f, 0.0f, 0.0f);
+	EndPoint.Type = ESplinePointType::Linear;
+	Road->SetRoadSplinePoints(RoadPoints, false, false);
+
+	AProceduralRoadJunctionActor* StartJunction =
+		Network->GetWorld()->SpawnActor<AProceduralRoadJunctionActor>();
+	AProceduralRoadJunctionActor* EndJunction =
+		Network->GetWorld()->SpawnActor<AProceduralRoadJunctionActor>();
+	EndJunction->SetActorLocation(EndPoint.WorldLocation);
+	FProceduralRoadJunctionConnection StartConnection;
+	StartConnection.Road = Road;
+	StartConnection.Endpoint = ERoadSplineEndpoint::Start;
+	StartConnection.TrimDistance = 300.0f;
+	FProceduralRoadJunctionConnection EndConnection;
+	EndConnection.Road = Road;
+	EndConnection.Endpoint = ERoadSplineEndpoint::End;
+	EndConnection.TrimDistance = 300.0f;
+	StartJunction->SetManagedConnections(
+		{StartConnection},
+		FGuid::NewGuid(),
+		FGuid::NewGuid(),
+		false);
+	EndJunction->SetManagedConnections(
+		{EndConnection},
+		FGuid::NewGuid(),
+		FGuid::NewGuid(),
+		false);
+	StartJunction->RebuildJunction();
+	EndJunction->RebuildJunction();
+
+	float StartTrimDistance = 0.0f;
+	float EndTrimDistance = 0.0f;
+	TestTrue(
+		TEXT("Start junction owns its road endpoint"),
+		Road->GetJunctionTrimDistance(
+			ERoadSplineEndpoint::Start,
+			StartTrimDistance));
+	TestTrue(
+		TEXT("End junction owns its road endpoint"),
+		Road->GetJunctionTrimDistance(
+			ERoadSplineEndpoint::End,
+			EndTrimDistance));
+	TestEqual(TEXT("Nearby start trim is reduced"), StartTrimDistance, 200.0f);
+	TestEqual(TEXT("Nearby end trim is reduced"), EndTrimDistance, 200.0f);
 	return true;
 }
 

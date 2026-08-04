@@ -122,9 +122,44 @@ editor. When too few endpoints are available to produce a mesh, an orange
 wireframe sphere shows the discovery area. Disable automatic endpoint discovery
 to configure the connection list manually.
 
-The initial center-fan patch works well for ordinary T-junctions, crossroads,
-and other simple star-shaped layouts. Complex non-convex intersection topology
-and generated junction markings remain future extensions.
+Road terrain traces ignore cached procedural roads and junctions, preventing
+successive rebuilds from treating generated collision as terrain and creating
+ramps. Network rebuilds suppress redundant deferred junction callbacks while
+roads are rebuilt. **Rebuild Dirty** remains incremental for roads but always
+refreshes every managed junction cache; **Rebuild All** refreshes both complete
+sets. Both operations are geometrically idempotent.
+
+Junction surfaces use terrain-sampled radial rings instead of one large center
+fan. Each road first finishes rebuilding its trim, then the junction copies the
+actual serialized surface-row vertices from that road's endpoint mesh. This
+keeps the rendered meshes on exactly the same seam instead of independently
+resampling the spline. The center height is extrapolated from the connected road
+approaches rather than taken from one terrain trace. Inner rings blend from that
+road-supported center to the exact seams and constrain terrain displacement to
+**Maximum Interior Terrain Deviation** (50 cm by default), preventing terrain
+holes from collapsing the patch. The embedded perimeter skirt also copies each
+road's actual side-flap corner vertices, preserves both flap anchors at shared
+corners, and uses the dominant connected-road flap material. Terrain-facing skirt spans
+are sampled independently at **Ground Blend Sample Spacing** (75 cm by default),
+interpolate smoothly between the exact road-flap endpoint offsets, and remain
+terrain projected between those anchors. Shared corners retain every connected
+road identity, so the skirt does not cross either open road mouth. Terrain
+traces ignore procedural roads and other junction meshes so cached geometry
+cannot be mistaken for the ground.
+
+Nearby junctions share the available length of any road connecting them, keeping
+a configurable minimum road section between their trims. Their perimeter skirts
+stop at the junction-center bisector, and managed neighboring junctions rebuild
+together when either changes. Tune **Terrain Sample Spacing**, **Ground Blend
+Width**, **Ground Blend Embed Depth**, **Nearby Junction Search Radius**, and
+**Minimum Road Length Between Junctions** on the junction class defaults. Use
+**Ground Blend Sample Spacing** to trade skirt smoothness for vertex count and
+**Maximum Interior Terrain Deviation** to control interior ground conformity.
+After upgrading an existing map, restart the editor and run **Rebuild All** once
+to replace previously cached center-fan junction meshes.
+
+Complex non-convex intersection topology and generated junction markings remain
+future extensions.
 
 ## Road Painting Editor Mode
 

@@ -1161,6 +1161,7 @@ void ARoadNetworkActor::RebuildGeneratedActors()
 	BuildAdjacency(Adjacency);
 	TArray<FRoadGeneratedJunction> NewGeneratedJunctions;
 	TSet<AProceduralRoadJunctionActor*> UsedJunctionActors;
+	TSet<AProceduralRoadJunctionActor*> JunctionsToRebuild;
 	for (const TPair<FGuid, TArray<int32>>& Pair : Adjacency)
 	{
 		TSet<TSoftClassPtr<AProceduralRoadActor>> ConnectedClasses;
@@ -1183,6 +1184,7 @@ void ARoadNetworkActor::RebuildGeneratedActors()
 		}
 		AProceduralRoadJunctionActor* Junction = FindReusableJunction(Pair.Key);
 		bool bJunctionDirty = bForceFullRebuild
+			|| bForceJunctionRebuild
 			|| DirtyPointIds.Contains(Pair.Key)
 			|| !Junction;
 		UClass* DesiredJunctionClass = JunctionClass.LoadSynchronous();
@@ -1252,11 +1254,7 @@ void ARoadNetworkActor::RebuildGeneratedActors()
 		{
 			Junction->SetActorLocation(NetworkPoint->WorldLocation);
 			Junction->SetManagedConnections(Connections, NetworkId, Pair.Key, false);
-			Junction->RebuildJunction();
-			for (const FProceduralRoadJunctionConnection& Connection : Connections)
-			{
-				RoadsToRebuild.Add(Connection.Road);
-			}
+			JunctionsToRebuild.Add(Junction);
 		}
 		FRoadGeneratedJunction& GeneratedJunction = NewGeneratedJunctions.AddDefaulted_GetRef();
 		GeneratedJunction.NodeId = Pair.Key;
@@ -1264,6 +1262,13 @@ void ARoadNetworkActor::RebuildGeneratedActors()
 		UsedJunctionActors.Add(Junction);
 	}
 
+	TArray<TPair<FVector, float>> DirtyJunctionNeighborhoods;
+	for (AProceduralRoadJunctionActor* Junction : JunctionsToRebuild)
+	{
+		DirtyJunctionNeighborhoods.Add(TPair<FVector, float>(
+			Junction->GetActorLocation(),
+			Junction->GetNearbyJunctionSearchRadius()));
+	}
 	for (const FRoadGeneratedJunction& ExistingJunction : GeneratedJunctions)
 	{
 		AProceduralRoadJunctionActor* Junction = ExistingJunction.JunctionActor.LoadSynchronous();
@@ -1271,22 +1276,62 @@ void ARoadNetworkActor::RebuildGeneratedActors()
 			&& Junction->IsManagedByRoadNetwork(NetworkId)
 			&& !UsedJunctionActors.Contains(Junction))
 		{
+			DirtyJunctionNeighborhoods.Add(TPair<FVector, float>(
+				Junction->GetActorLocation(),
+				Junction->GetNearbyJunctionSearchRadius()));
 			GetWorld()->EditorDestroyActor(Junction, true);
+		}
+	}
+	for (const FRoadGeneratedJunction& GeneratedJunction : NewGeneratedJunctions)
+	{
+		AProceduralRoadJunctionActor* Junction =
+			GeneratedJunction.JunctionActor.LoadSynchronous();
+		if (!Junction || JunctionsToRebuild.Contains(Junction))
+		{
+			continue;
+		}
+		for (const TPair<FVector, float>& DirtyNeighborhood : DirtyJunctionNeighborhoods)
+		{
+			const float RebuildRadius = FMath::Max(
+				Junction->GetNearbyJunctionSearchRadius(),
+				DirtyNeighborhood.Value);
+			if (FVector2D::DistSquared(
+				FVector2D(Junction->GetActorLocation()),
+				FVector2D(DirtyNeighborhood.Key))
+				<= FMath::Square(RebuildRadius))
+			{
+				JunctionsToRebuild.Add(Junction);
+				break;
+			}
+		}
+	}
+	for (AProceduralRoadJunctionActor* Junction : JunctionsToRebuild)
+	{
+		Junction->SynchronizeJunctionRoadTrims();
+		for (const FProceduralRoadJunctionConnection& Connection :
+			Junction->GetRoadConnections())
+		{
+			RoadsToRebuild.Add(Connection.Road);
 		}
 	}
 	for (AProceduralRoadActor* Road : UsedRoadActors)
 	{
-		Road->SetEditorRebuildDeferred(false);
 		if (RoadsToRebuild.Contains(Road))
 		{
 			Road->RebuildRoad();
 		}
+		Road->SetEditorRebuildDeferred(false);
+	}
+	for (AProceduralRoadJunctionActor* Junction : JunctionsToRebuild)
+	{
+		Junction->RebuildJunctionMesh();
 	}
 	GeneratedRuns = MoveTemp(NewGeneratedRuns);
 	GeneratedJunctions = MoveTemp(NewGeneratedJunctions);
 	DirtyLinkIds.Reset();
 	DirtyPointIds.Reset();
 	bForceFullRebuild = false;
+	bForceJunctionRebuild = false;
 	MarkPackageDirty();
 }
 
@@ -1634,6 +1679,7 @@ bool ARoadNetworkActor::ValidateGraph(FString& OutErrors) const
 
 void ARoadNetworkActor::RebuildDirty()
 {
+	bForceJunctionRebuild = true;
 	RebuildGeneratedActors();
 }
 

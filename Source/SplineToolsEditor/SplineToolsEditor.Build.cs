@@ -28,7 +28,8 @@ public class SplineToolsEditor : ModuleRules
 				"InteractiveToolsFramework",
 				"EditorInteractiveToolsFramework",
 				"PropertyEditor",
-				"Landscape"
+				"Landscape",
+				"ProceduralMeshComponent"
 			});
 	}
 }

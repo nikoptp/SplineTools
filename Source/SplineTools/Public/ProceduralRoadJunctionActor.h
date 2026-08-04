@@ -36,8 +36,12 @@ public:
 
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Road Junction")
 	void RebuildJunction();
+	/** Generates the patch from the connected roads' current cached endpoint geometry. */
+	void RebuildJunctionMesh();
 
 #if WITH_EDITOR
+	/** Applies endpoint ownership and trim distances without generating mesh geometry. */
+	void SynchronizeJunctionRoadTrims();
 	void SetManagedConnections(
 		const TArray<FProceduralRoadJunctionConnection>& InConnections,
 		const FGuid& NetworkId,
@@ -46,6 +50,7 @@ public:
 	bool IsManagedByRoadNetwork(const FGuid& NetworkId) const;
 	FGuid GetManagedRoadNodeId() const;
 	const TArray<FProceduralRoadJunctionConnection>& GetRoadConnections() const;
+	float GetNearbyJunctionSearchRadius() const;
 #endif
 
 #if WITH_EDITOR
@@ -68,13 +73,24 @@ private:
 	{
 		TWeakObjectPtr<AProceduralRoadActor> Road;
 		ERoadSplineEndpoint Endpoint = ERoadSplineEndpoint::End;
+		float TrimDistance = 0.0f;
 	};
 
 	void DiscoverNearbyRoadEndpoints();
 	void SynchronizeRoadTrims();
 	void ReleaseRoadTrims();
 	bool IsConnectionConfigured(const FAppliedConnection& AppliedConnection) const;
+	float GetEffectiveTrimDistance(
+		const FProceduralRoadJunctionConnection& Connection) const;
+	void GatherNearbyJunctions(
+		TArray<AProceduralRoadJunctionActor*>& OutJunctions) const;
+	FVector ClampBlendPointToNearbyJunctions(
+		const FVector& InnerPoint,
+		const FVector& DesiredOuterPoint,
+		const TArray<AProceduralRoadJunctionActor*>& NearbyJunctions) const;
 	UMaterialInterface* GetEffectiveJunctionMaterial() const;
+	UMaterialInterface* GetEffectiveGroundBlendMaterial() const;
+	void RebuildJunctionInternal(bool bMarkDirty);
 	bool GenerateJunctionPatch();
 	void UpdateEditorVisualization(bool bHasGeneratedMesh);
 	bool TraceTerrain(const FVector& DesiredPosition, FHitResult& OutHit) const;
@@ -82,6 +98,7 @@ private:
 
 #if WITH_EDITOR
 	void QueueEditorRebuild();
+	void QueueNearbyJunctionRebuilds();
 	void CancelQueuedEditorRebuild();
 #endif
 
@@ -127,6 +144,27 @@ private:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (AllowPrivateAccess = "true"))
 	float SurfaceOffset = 3.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (ClampMin = "25.0", AllowPrivateAccess = "true"))
+	float TerrainSampleSpacing = 150.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (ClampMin = "25.0", AllowPrivateAccess = "true"))
+	float GroundBlendSampleSpacing = 75.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (ClampMin = "0.0", AllowPrivateAccess = "true"))
+	float MaximumInteriorTerrainDeviation = 50.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (ClampMin = "0.0", AllowPrivateAccess = "true"))
+	float GroundBlendWidth = 150.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (ClampMin = "0.0", AllowPrivateAccess = "true"))
+	float GroundBlendEmbedDepth = 12.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Nearby Junctions", meta = (ClampMin = "0.0", AllowPrivateAccess = "true"))
+	float NearbyJunctionSearchRadius = 2500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Nearby Junctions", meta = (ClampMin = "0.0", AllowPrivateAccess = "true"))
+	float MinimumRoadLengthBetweenJunctions = 100.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Collision", meta = (AllowPrivateAccess = "true"))
 	bool bGenerateCollision = true;

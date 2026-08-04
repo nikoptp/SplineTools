@@ -6,10 +6,7 @@
 #include "KismetProceduralMeshLibrary.h"
 #include "Materials/MaterialInterface.h"
 #include "ProceduralMeshComponent.h"
-
-#if WITH_EDITOR
 #include "ProceduralRoadJunctionActor.h"
-#endif
 
 struct FSplineRoadCrossSection
 {
@@ -148,7 +145,10 @@ void AProceduralRoadActor::RebuildSplineTool()
 	}
 
 #if WITH_EDITOR
-	AProceduralRoadJunctionActor::NotifyRoadEdited(this);
+	if (!bEditorRebuildDeferred)
+	{
+		AProceduralRoadJunctionActor::NotifyRoadEdited(this);
+	}
 #endif
 }
 
@@ -188,6 +188,11 @@ bool AProceduralRoadActor::HasCachedRoadData() const
 UMaterialInterface* AProceduralRoadActor::GetRoadMaterial() const
 {
 	return RoadMaterial;
+}
+
+UMaterialInterface* AProceduralRoadActor::GetRoadSideFlapMaterial() const
+{
+	return SideFlapMaterial ? SideFlapMaterial.Get() : RoadMaterial.Get();
 }
 
 bool AProceduralRoadActor::SetJunctionTrim(
@@ -270,6 +275,48 @@ bool AProceduralRoadActor::GetJunctionEdge(
 	FVector& OutRight,
 	FVector& OutDirection) const
 {
+	FProceduralRoadJunctionEdgeGeometry Geometry;
+	if (!GetJunctionEdgeGeometry(Endpoint, TrimDistance, Geometry))
+	{
+		return false;
+	}
+
+	OutCenter = FVector::ZeroVector;
+	for (const FVector& SurfacePoint : Geometry.SurfacePoints)
+	{
+		OutCenter += SurfacePoint;
+	}
+	OutCenter /= Geometry.SurfacePoints.Num();
+	OutLeft = Geometry.SurfacePoints[0];
+	OutRight = Geometry.SurfacePoints.Last();
+	OutDirection = Geometry.Direction;
+	return true;
+}
+
+bool AProceduralRoadActor::GetJunctionEdgeSamples(
+	ERoadSplineEndpoint Endpoint,
+	float TrimDistance,
+	TArray<FVector>& OutEdgePoints,
+	FVector& OutDirection) const
+{
+	FProceduralRoadJunctionEdgeGeometry Geometry;
+	if (!GetJunctionEdgeGeometry(Endpoint, TrimDistance, Geometry))
+	{
+		OutEdgePoints.Reset();
+		return false;
+	}
+
+	OutEdgePoints = MoveTemp(Geometry.SurfacePoints);
+	OutDirection = Geometry.Direction;
+	return true;
+}
+
+bool AProceduralRoadActor::GetJunctionEdgeGeometry(
+	ERoadSplineEndpoint Endpoint,
+	float TrimDistance,
+	FProceduralRoadJunctionEdgeGeometry& OutGeometry) const
+{
+	OutGeometry = FProceduralRoadJunctionEdgeGeometry();
 	if (!IsSplineUsable())
 	{
 		return false;
@@ -279,17 +326,125 @@ bool AProceduralRoadActor::GetJunctionEdge(
 	const float Distance = Endpoint == ERoadSplineEndpoint::Start
 		? FMath::Clamp(TrimDistance, 0.0f, SplineLength)
 		: FMath::Clamp(SplineLength - TrimDistance, 0.0f, SplineLength);
-	OutCenter = SampleRoadPosition(Distance, 0.0f);
-	OutLeft = SampleRoadPosition(Distance, -RoadWidth * 0.5f);
-	OutRight = SampleRoadPosition(Distance, RoadWidth * 0.5f);
-	OutDirection = ToolSpline->GetTangentAtDistanceAlongSpline(
+	OutGeometry.Direction = ToolSpline->GetTangentAtDistanceAlongSpline(
 		Distance,
 		ESplineCoordinateSpace::World).GetSafeNormal();
 	if (Endpoint == ERoadSplineEndpoint::Start)
 	{
-		OutDirection *= -1.0f;
+		OutGeometry.Direction *= -1.0f;
+	}
+
+	const int32 SubdivisionCount = FMath::Max(WidthSubdivisions, 1);
+	const int32 RoadPointCount = SubdivisionCount + 1;
+	UProceduralMeshComponent* EndpointChunk = nullptr;
+	if (Endpoint == ERoadSplineEndpoint::Start)
+	{
+		for (UProceduralMeshComponent* RoadChunk : GeneratedRoadChunks)
+		{
+			if (IsValid(RoadChunk) && RoadChunk->GetProcMeshSection(0))
+			{
+				EndpointChunk = RoadChunk;
+				break;
+			}
+		}
+	}
+	else
+	{
+		for (int32 ChunkIndex = GeneratedRoadChunks.Num() - 1;
+			ChunkIndex >= 0;
+			--ChunkIndex)
+		{
+			UProceduralMeshComponent* RoadChunk = GeneratedRoadChunks[ChunkIndex];
+			if (IsValid(RoadChunk) && RoadChunk->GetProcMeshSection(0))
+			{
+				EndpointChunk = RoadChunk;
+				break;
+			}
+		}
+	}
+
+	if (EndpointChunk)
+	{
+		const FProcMeshSection* SurfaceSection = EndpointChunk->GetProcMeshSection(0);
+		if (SurfaceSection
+			&& SurfaceSection->ProcVertexBuffer.Num() >= RoadPointCount
+			&& SurfaceSection->ProcVertexBuffer.Num() % RoadPointCount == 0)
+		{
+			const int32 CrossSectionCount =
+				SurfaceSection->ProcVertexBuffer.Num() / RoadPointCount;
+			const int32 SurfaceStart = Endpoint == ERoadSplineEndpoint::Start
+				? 0
+				: (CrossSectionCount - 1) * RoadPointCount;
+			OutGeometry.SurfacePoints.Reserve(RoadPointCount);
+			for (int32 WidthIndex = 0; WidthIndex < RoadPointCount; ++WidthIndex)
+			{
+				OutGeometry.SurfacePoints.Add(
+					EndpointChunk->GetComponentTransform().TransformPosition(
+						SurfaceSection->ProcVertexBuffer[SurfaceStart + WidthIndex].Position));
+			}
+
+			const FProcMeshSection* FlapSection = EndpointChunk->GetProcMeshSection(1);
+			const int32 RequiredFlapVertexCount = CrossSectionCount * 4;
+			if (SideFlapWidth > KINDA_SMALL_NUMBER
+				&& FlapSection
+				&& FlapSection->ProcVertexBuffer.Num() >= RequiredFlapVertexCount)
+			{
+				const int32 FlapStart = Endpoint == ERoadSplineEndpoint::Start
+					? 0
+					: (CrossSectionCount - 1) * 4;
+				OutGeometry.LeftFlapPoint =
+					EndpointChunk->GetComponentTransform().TransformPosition(
+						FlapSection->ProcVertexBuffer[FlapStart].Position);
+				OutGeometry.RightFlapPoint =
+					EndpointChunk->GetComponentTransform().TransformPosition(
+						FlapSection->ProcVertexBuffer[FlapStart + 3].Position);
+				OutGeometry.bHasSideFlaps = true;
+			}
+			OutGeometry.bUsesCachedMesh = true;
+			return true;
+		}
+	}
+
+	OutGeometry.SurfacePoints.Reserve(RoadPointCount);
+	for (int32 WidthIndex = 0; WidthIndex <= SubdivisionCount; ++WidthIndex)
+	{
+		const float LateralAlpha = static_cast<float>(WidthIndex) / SubdivisionCount;
+		OutGeometry.SurfacePoints.Add(SampleRoadPosition(
+			Distance,
+			FMath::Lerp(-RoadWidth * 0.5f, RoadWidth * 0.5f, LateralAlpha)));
+	}
+	if (SideFlapWidth > KINDA_SMALL_NUMBER)
+	{
+		OutGeometry.LeftFlapPoint = SampleRoadPosition(
+			Distance,
+			-RoadWidth * 0.5f - SideFlapWidth)
+			- FVector::UpVector * SideFlapEmbedDepth;
+		OutGeometry.RightFlapPoint = SampleRoadPosition(
+			Distance,
+			RoadWidth * 0.5f + SideFlapWidth)
+			- FVector::UpVector * SideFlapEmbedDepth;
+		OutGeometry.bHasSideFlaps = true;
 	}
 	return true;
+}
+
+float AProceduralRoadActor::GetRoadSplineLength() const
+{
+	return IsSplineUsable() ? ToolSpline->GetSplineLength() : 0.0f;
+}
+
+bool AProceduralRoadActor::GetJunctionTrimDistance(
+	ERoadSplineEndpoint Endpoint,
+	float& OutTrimDistance) const
+{
+	const TWeakObjectPtr<AActor>& JunctionOwner =
+		Endpoint == ERoadSplineEndpoint::Start
+			? StartJunctionOwner
+			: EndJunctionOwner;
+	OutTrimDistance = Endpoint == ERoadSplineEndpoint::Start
+		? StartJunctionTrimDistance
+		: EndJunctionTrimDistance;
+	return JunctionOwner.IsValid();
 }
 
 bool AProceduralRoadActor::GetSplineEndpointLocation(
@@ -1320,13 +1475,28 @@ bool AProceduralRoadActor::TraceTerrain(
 		return false;
 	}
 
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(ProceduralRoadTerrain), false, this);
-	return World->LineTraceSingleByChannel(
-		OutHit,
+	FCollisionQueryParams QueryParams(
+		SCENE_QUERY_STAT(ProceduralRoadTerrain),
+		false,
+		this);
+	TArray<FHitResult> Hits;
+	World->LineTraceMultiByChannel(
+		Hits,
 		DesiredPosition + FVector::UpVector * TerrainTraceHeightAbove,
 		DesiredPosition - FVector::UpVector * TerrainTraceHeightBelow,
 		TerrainTraceChannel,
 		QueryParams);
+	for (const FHitResult& Hit : Hits)
+	{
+		if (Hit.GetActor()
+			&& !Hit.GetActor()->IsA<AProceduralRoadActor>()
+			&& !Hit.GetActor()->IsA<AProceduralRoadJunctionActor>())
+		{
+			OutHit = Hit;
+			return true;
+		}
+	}
+	return false;
 }
 
 UMaterialInterface* AProceduralRoadActor::GetCenterLineMaterial() const

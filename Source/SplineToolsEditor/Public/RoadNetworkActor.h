@@ -228,4 +228,7 @@ private:
 
 	UPROPERTY(Transient)
 	bool bForceFullRebuild = true;
+
+	UPROPERTY(Transient)
+	bool bForceJunctionRebuild = false;
 };
