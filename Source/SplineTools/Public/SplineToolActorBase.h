@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Containers/Ticker.h"
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "SplineToolActorBase.generated.h"
@@ -27,6 +28,7 @@ protected:
 	virtual void ResetGeneratedContent();
 	virtual void GenerateSplineContent();
 	virtual void FinalizeGeneratedContent();
+	virtual bool ShouldRebuildInGameWorld() const;
 
 	UHierarchicalInstancedStaticMeshComponent* CreateGeneratedHISM(const FString& ComponentName, UStaticMesh* StaticMesh);
 	bool IsSplineUsable() const;
@@ -64,7 +66,8 @@ public:
 
 private:
 	void QueueEditorRebuild();
+	void CancelQueuedEditorRebuild();
 
-	bool bEditorRebuildQueued = false;
+	FTSTicker::FDelegateHandle EditorRebuildTickerHandle;
 #endif
 };

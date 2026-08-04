@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Components/SplineComponent.h"
 #include "SplineToolActorBase.h"
 #include "ProceduralRoadActor.generated.h"
 
@@ -8,6 +9,37 @@ class UDecalComponent;
 class UMaterialInterface;
 class UProceduralMeshComponent;
 struct FSplineRoadCrossSection;
+
+UENUM(BlueprintType)
+enum class ERoadSplineEndpoint : uint8
+{
+	Start,
+	End,
+};
+
+USTRUCT(BlueprintType)
+struct SPLINETOOLS_API FProceduralRoadSplinePoint
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road")
+	FVector WorldLocation = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road")
+	FVector WorldArriveTangent = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road")
+	FVector WorldLeaveTangent = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road")
+	FRotator Rotation = FRotator::ZeroRotator;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road")
+	FVector Scale = FVector::OneVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road")
+	TEnumAsByte<ESplinePointType::Type> Type = ESplinePointType::Curve;
+};
 
 UCLASS(BlueprintType)
 class SPLINETOOLS_API AProceduralRoadActor : public ASplineToolActorBase
@@ -19,14 +51,62 @@ public:
 
 	virtual void RebuildSplineTool() override;
 
-	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Road")
+	/** Rebuilds and serializes the road cache. Save the actor/level after running it. */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Road", meta = (DisplayName = "Bake Road Cache"))
 	void RebuildRoad();
 
+	UFUNCTION(BlueprintPure, Category = "Road")
+	bool HasCachedRoadData() const;
+
+	UFUNCTION(BlueprintPure, Category = "Road|Material")
+	UMaterialInterface* GetRoadMaterial() const;
+
+	bool SetJunctionTrim(
+		ERoadSplineEndpoint Endpoint,
+		float TrimDistance,
+		AActor* JunctionOwner);
+	void ClearJunctionTrim(ERoadSplineEndpoint Endpoint, AActor* JunctionOwner);
+	bool GetJunctionEdge(
+		ERoadSplineEndpoint Endpoint,
+		float TrimDistance,
+		FVector& OutCenter,
+		FVector& OutLeft,
+		FVector& OutRight,
+		FVector& OutDirection) const;
+	bool GetSplineEndpointLocation(
+		ERoadSplineEndpoint Endpoint,
+		FVector& OutLocation) const;
+	bool IsJunctionEndpointAvailable(
+		ERoadSplineEndpoint Endpoint,
+		const AActor* JunctionOwner) const;
+
+#if WITH_EDITOR
+	void GetRoadSplinePoints(TArray<FProceduralRoadSplinePoint>& OutPoints) const;
+	void SetRoadSplinePoints(
+		const TArray<FProceduralRoadSplinePoint>& Points,
+		bool bInClosedLoop,
+		bool bRebuild = true);
+	void SampleRoadSplineSegment(
+		int32 SegmentIndex,
+		float SampleInterval,
+		TArray<FVector>& OutWorldPoints) const;
+	bool IsRoadSplineClosedLoop() const;
+	void SetManagedRoadIdentity(const FGuid& NetworkId, const FGuid& RunId);
+	bool IsManagedByRoadNetwork(const FGuid& NetworkId) const;
+	FGuid GetManagedRoadRunId() const;
+	void SetEditorRebuildDeferred(bool bDeferred);
+#endif
+
 protected:
+	virtual void PostLoad() override;
+	virtual void PostDuplicate(EDuplicateMode::Type DuplicateMode) override;
+	virtual void PostInitializeComponents() override;
 	virtual void UpdateSplineSettings() override;
 	virtual void ResetGeneratedContent() override;
+	virtual bool ShouldRebuildInGameWorld() const override;
 
 private:
+	void RestoreCachedRoadComponents();
 	void UpdateRoadChunks();
 	void EnsureRoadChunkCount(int32 RequiredChunkCount);
 	UProceduralMeshComponent* CreateRoadChunk(int32 ChunkIndex);
@@ -34,7 +114,7 @@ private:
 	void RebuildRoadChunk(
 		UProceduralMeshComponent* RoadChunk,
 		const TArray<FSplineRoadCrossSection>& CrossSections);
-	uint32 CalculateChunkHash(const TArray<FSplineRoadCrossSection>& CrossSections) const;
+	uint32 CalculateChunkSourceHash(float StartDistance, float EndDistance) const;
 	void BuildCrossSections(
 		float StartDistance,
 		float EndDistance,
@@ -43,6 +123,9 @@ private:
 		UProceduralMeshComponent* RoadChunk,
 		const TArray<FSplineRoadCrossSection>& CrossSections);
 	void BuildSideFlaps(
+		UProceduralMeshComponent* RoadChunk,
+		const TArray<FSplineRoadCrossSection>& CrossSections);
+	void BuildRoadLines(
 		UProceduralMeshComponent* RoadChunk,
 		const TArray<FSplineRoadCrossSection>& CrossSections);
 	void BuildSimpleCollision(
@@ -61,7 +144,11 @@ private:
 		const TArray<FVector>& Vertices,
 		const TArray<int32>& Triangles,
 		const TArray<FVector2D>& UVs,
+		const TArray<FVector2D>& MarkingUVs,
 		UMaterialInterface* Material);
+	UMaterialInterface* GetCenterLineMaterial() const;
+	float GetEffectiveStartDistance() const;
+	float GetEffectiveEndDistance() const;
 
 private:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Road", meta = (AllowPrivateAccess = "true"))
@@ -91,6 +178,51 @@ private:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Material", meta = (ClampMin = "1.0", AllowPrivateAccess = "true"))
 	FVector2D UVWorldSize = FVector2D(400.0f, 400.0f);
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Material", meta = (ClampMin = "1.0", AllowPrivateAccess = "true"))
+	float MarkingUVWorldLength = 400.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Side", meta = (DisplayName = "Side Line Material", AllowPrivateAccess = "true"))
+	TObjectPtr<UMaterialInterface> RoadLineMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Center", meta = (AllowPrivateAccess = "true"))
+	bool bGenerateCenterLine = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Side", meta = (AllowPrivateAccess = "true"))
+	bool bGenerateSideLines = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Side", meta = (DisplayName = "Side Line Width", ClampMin = "1.0", AllowPrivateAccess = "true"))
+	float RoadLineWidth = 12.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Side", meta = (ClampMin = "0.0", AllowPrivateAccess = "true"))
+	float SideLineInset = 30.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Side", meta = (DisplayName = "Side Line Surface Offset", ClampMin = "0.0", AllowPrivateAccess = "true"))
+	float RoadLineSurfaceOffset = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Side", meta = (DisplayName = "Side Line UV World Length", ClampMin = "1.0", AllowPrivateAccess = "true"))
+	float RoadLineUVWorldLength = 100.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Center", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UMaterialInterface> CenterLineMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Center", meta = (ClampMin = "1.0", AllowPrivateAccess = "true"))
+	float CenterLineWidth = 12.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Center", meta = (ClampMin = "0.0", AllowPrivateAccess = "true"))
+	float CenterLineSurfaceOffset = 0.6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Center", meta = (ClampMin = "1.0", AllowPrivateAccess = "true"))
+	float CenterLineUVWorldLength = 100.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Center", meta = (AllowPrivateAccess = "true"))
+	bool bCenterLineHasGaps = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Center", meta = (EditCondition = "bCenterLineHasGaps", ClampMin = "1.0", AllowPrivateAccess = "true"))
+	float CenterLineDashLength = 300.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Center", meta = (EditCondition = "bCenterLineHasGaps", ClampMin = "1.0", AllowPrivateAccess = "true"))
+	float CenterLineGapLength = 300.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Terrain", meta = (AllowPrivateAccess = "true"))
 	bool bAlignToTerrain = true;
 
@@ -111,6 +243,15 @@ private:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Terrain", meta = (ClampMin = "0.0", AllowPrivateAccess = "true"))
 	float SideFlapEmbedDepth = 15.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Terrain", meta = (AllowPrivateAccess = "true"))
+	bool bGenerateEndFlaps = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Terrain", meta = (EditCondition = "bGenerateEndFlaps", ClampMin = "0.0", AllowPrivateAccess = "true"))
+	float EndFlapLength = 100.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Terrain", meta = (EditCondition = "bGenerateEndFlaps", ClampMin = "0.0", AllowPrivateAccess = "true"))
+	float EndFlapEmbedDepth = 15.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Collision", meta = (AllowPrivateAccess = "true"))
 	bool bGenerateCollision = true;
@@ -148,11 +289,30 @@ private:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Decals", meta = (ClampMin = "0.0", ClampMax = "1.0", AllowPrivateAccess = "true"))
 	float DecalFadeScreenSize = 0.01f;
 
-	UPROPERTY(Transient)
+	/** Serialized editor-built decal cache loaded directly by PIE and packaged builds. */
+	UPROPERTY()
 	TArray<TObjectPtr<UDecalComponent>> GeneratedDecals;
 
-	UPROPERTY(Transient)
+	/** Serialized editor-built mesh cache loaded directly by PIE and packaged builds. */
+	UPROPERTY()
 	TArray<TObjectPtr<UProceduralMeshComponent>> GeneratedRoadChunks;
 
-	TArray<uint32> RoadChunkHashes;
+	/** Source hashes persisted with the mesh cache for selective editor rebuilds. */
+	UPROPERTY()
+	TArray<uint32> RoadChunkSourceHashes;
+	TWeakObjectPtr<AActor> StartJunctionOwner;
+	TWeakObjectPtr<AActor> EndJunctionOwner;
+	float StartJunctionTrimDistance = 0.0f;
+	float EndJunctionTrimDistance = 0.0f;
+
+#if WITH_EDITORONLY_DATA
+	UPROPERTY(VisibleAnywhere, Category = "Road|Painting")
+	FGuid ManagedRoadNetworkId;
+
+	UPROPERTY(VisibleAnywhere, Category = "Road|Painting")
+	FGuid ManagedRoadRunId;
+
+	UPROPERTY(Transient)
+	bool bEditorRebuildDeferred = false;
+#endif
 };

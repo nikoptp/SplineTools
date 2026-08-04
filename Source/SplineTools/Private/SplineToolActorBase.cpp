@@ -22,7 +22,10 @@ ASplineToolActorBase::ASplineToolActorBase()
 void ASplineToolActorBase::BeginPlay()
 {
 	Super::BeginPlay();
-	RebuildSplineTool();
+	if (ShouldRebuildInGameWorld())
+	{
+		RebuildSplineTool();
+	}
 }
 
 void ASplineToolActorBase::OnConstruction(const FTransform& Transform)
@@ -31,7 +34,10 @@ void ASplineToolActorBase::OnConstruction(const FTransform& Transform)
 
 	if (GetWorld() && GetWorld()->IsGameWorld())
 	{
-		RebuildSplineTool();
+		if (ShouldRebuildInGameWorld())
+		{
+			RebuildSplineTool();
+		}
 		return;
 	}
 
@@ -96,6 +102,11 @@ void ASplineToolActorBase::FinalizeGeneratedContent()
 		MeshComponent->BuildTreeIfOutdated(false, true);
 		MeshComponent->MarkRenderStateDirty();
 	}
+}
+
+bool ASplineToolActorBase::ShouldRebuildInGameWorld() const
+{
+	return true;
 }
 
 UHierarchicalInstancedStaticMeshComponent* ASplineToolActorBase::CreateGeneratedHISM(const FString& ComponentName, UStaticMesh* StaticMesh)
@@ -171,6 +182,16 @@ void ASplineToolActorBase::AddSplineInstance(
 void ASplineToolActorBase::PostEditMove(bool bFinished)
 {
 	Super::PostEditMove(bFinished);
+	if (bFinished)
+	{
+		CancelQueuedEditorRebuild();
+		if (!IsTemplate())
+		{
+			RebuildSplineTool();
+		}
+		return;
+	}
+
 	QueueEditorRebuild();
 }
 
@@ -188,19 +209,13 @@ void ASplineToolActorBase::PostEditUndo()
 
 void ASplineToolActorBase::QueueEditorRebuild()
 {
-	if (bEditorRebuildQueued)
-	{
-		return;
-	}
-
-	bEditorRebuildQueued = true;
-
-	FTSTicker::GetCoreTicker().AddTicker(
+	CancelQueuedEditorRebuild();
+	EditorRebuildTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateWeakLambda(
 			this,
 			[this](float)
 			{
-				bEditorRebuildQueued = false;
+				EditorRebuildTickerHandle.Reset();
 				if (!IsTemplate())
 				{
 					RebuildSplineTool();
@@ -208,7 +223,19 @@ void ASplineToolActorBase::QueueEditorRebuild()
 
 				return false;
 			}
-		)
+		),
+		0.15f
 	);
+}
+
+void ASplineToolActorBase::CancelQueuedEditorRebuild()
+{
+	if (!EditorRebuildTickerHandle.IsValid())
+	{
+		return;
+	}
+
+	FTSTicker::GetCoreTicker().RemoveTicker(EditorRebuildTickerHandle);
+	EditorRebuildTickerHandle.Reset();
 }
 #endif
