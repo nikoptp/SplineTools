@@ -66,6 +66,11 @@ private:
 		FGuid& OutPointId,
 		FGuid& OutLinkId) const;
 	void SelectAtLocation(const FVector& WorldLocation);
+	void SelectInScreenRect(const FBox2D& ScreenRect);
+	bool ProjectWorldToScreen(
+		const FVector& WorldLocation,
+		FVector2D& OutScreenLocation) const;
+	void ResetDragState();
 
 	UPROPERTY()
 	TObjectPtr<URoadSelectToolProperties> Properties;
@@ -77,9 +82,17 @@ private:
 	TObjectPtr<UWorld> TargetWorld;
 
 	TUniquePtr<FScopedTransaction> MoveTransaction;
-	bool bMovingPoint = false;
+	bool bMovingSelection = false;
+	bool bMarqueeSelecting = false;
+	bool bMovedSelection = false;
 	FVector CursorLocation = FVector::ZeroVector;
 	bool bHasCursor = false;
 	FGuid HoverPointId;
 	FGuid HoverLinkId;
+	FVector2D MarqueeStartScreen = FVector2D::ZeroVector;
+	FVector2D MarqueeEndScreen = FVector2D::ZeroVector;
+	bool bHasMarqueeScreenPosition = false;
+	FMatrix CachedViewProjectionMatrix = FMatrix::Identity;
+	FIntRect CachedViewRect;
+	bool bHasCachedView = false;
 };

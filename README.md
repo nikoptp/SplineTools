@@ -190,9 +190,12 @@ The default authoring tolerances are:
 - 100 cm duplicate-intersection merging.
 - 200 cm maximum junction height difference.
 
-Use **Select/Move** to select graph points or links and drag points across the
-landscape. The Road Painting toolkit shows the active network, point/link/
-junction counts, pending rebuild state, and action buttons for **Delete**,
+Use **Select/Move** to click a graph point or link for single selection. Click
+and drag on terrain to marquee-select the visible points and road links inside
+the rectangle. Dragging any selected element moves all selected points and the
+endpoints of selected links together across the landscape. The Road Painting
+toolkit shows the active network, point/link/junction counts, pending rebuild
+state, and action buttons for **Delete**,
 **Adopt Selected**, **Rebuild Dirty**, **Rebuild All**, **Validate**, **Frame**,
 and **Insert Point**. **D** switches to Draw, **S** switches to Select/Move,
 **F** frames the current network or selection, and **Escape** cancels the

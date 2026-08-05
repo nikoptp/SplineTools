@@ -136,7 +136,7 @@ void URoadPaintingEditorMode::DeleteSelection()
 	{
 		const FScopedTransaction Transaction(LOCTEXT("DeleteRoadSelection", "Delete Road Network Selection"));
 		LastOperationText = Network->DeleteSelection()
-			? LOCTEXT("DeletedSelection", "Deleted the selected road element.")
+			? LOCTEXT("DeletedSelection", "Deleted the selected road elements.")
 			: LOCTEXT("DeleteSelectionFailed", "Nothing was selected.");
 	}
 }
@@ -203,8 +203,8 @@ bool URoadPaintingEditorMode::CanDeleteSelection() const
 {
 	if (ARoadNetworkActor* Network = FindRoadNetwork())
 	{
-		return Network->GetSelectedPointId().IsValid()
-			|| Network->GetSelectedLinkId().IsValid();
+		return !Network->GetSelectedPointIds().IsEmpty()
+			|| !Network->GetSelectedLinkIds().IsEmpty();
 	}
 	return false;
 }
@@ -244,7 +244,8 @@ bool URoadPaintingEditorMode::CanInsertPoint() const
 {
 	if (ARoadNetworkActor* Network = FindRoadNetwork())
 	{
-		return Network->GetSelectedLinkId().IsValid();
+		return Network->GetSelectedPointIds().IsEmpty()
+			&& Network->GetSelectedLinkIds().Num() == 1;
 	}
 	return false;
 }
@@ -259,22 +260,26 @@ void URoadPaintingEditorMode::FrameNetwork()
 	}
 
 	FBox Bounds(ForceInit);
-	if (Network->GetSelectedPointId().IsValid())
+	if (!Network->GetSelectedPointIds().IsEmpty()
+		|| !Network->GetSelectedLinkIds().IsEmpty())
 	{
-		if (const FRoadNetworkPoint* Point = Network->FindPoint(Network->GetSelectedPointId()))
+		for (const FGuid& PointId : Network->GetSelectedPointIds())
 		{
-			Bounds += Point->WorldLocation;
-		}
-	}
-	else if (Network->GetSelectedLinkId().IsValid())
-	{
-		if (const FRoadNetworkLink* Link = Network->FindLink(Network->GetSelectedLinkId()))
-		{
-			TArray<FVector> LinkSamples;
-			Network->GetLinkWorldSamples(*Link, LinkSamples);
-			for (const FVector& Point : LinkSamples)
+			if (const FRoadNetworkPoint* Point = Network->FindPoint(PointId))
 			{
-				Bounds += Point;
+				Bounds += Point->WorldLocation;
+			}
+		}
+		for (const FGuid& LinkId : Network->GetSelectedLinkIds())
+		{
+			if (const FRoadNetworkLink* Link = Network->FindLink(LinkId))
+			{
+				TArray<FVector> LinkSamples;
+				Network->GetLinkWorldSamples(*Link, LinkSamples);
+				for (const FVector& Point : LinkSamples)
+				{
+					Bounds += Point;
+				}
 			}
 		}
 	}
@@ -343,13 +348,22 @@ FText URoadPaintingEditorMode::GetSelectionText() const
 {
 	if (ARoadNetworkActor* Network = FindRoadNetwork())
 	{
-		if (Network->GetSelectedPointId().IsValid())
+		const int32 PointCount = Network->GetSelectedPointIds().Num();
+		const int32 LinkCount = Network->GetSelectedLinkIds().Num();
+		if (PointCount == 1 && LinkCount == 0)
 		{
 			return LOCTEXT("SelectedPoint", "Selected: control point");
 		}
-		if (Network->GetSelectedLinkId().IsValid())
+		if (LinkCount == 1 && PointCount == 0)
 		{
 			return LOCTEXT("SelectedLink", "Selected: road link");
+		}
+		if (PointCount > 0 || LinkCount > 0)
+		{
+			return FText::Format(
+				LOCTEXT("SelectedElements", "Selected: {0} points, {1} links"),
+				FText::AsNumber(PointCount),
+				FText::AsNumber(LinkCount));
 		}
 	}
 	return LOCTEXT("NoSelection", "Selected: none");

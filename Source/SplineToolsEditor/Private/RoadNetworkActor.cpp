@@ -207,8 +207,7 @@ void ARoadNetworkActor::QueueUndoRebuild()
 				UndoRebuildTickerHandle.Reset();
 				if (!IsTemplate() && GetWorld())
 				{
-					SelectedPointId.Invalidate();
-					SelectedLinkId.Invalidate();
+					SetSelection(FGuid(), FGuid());
 					bForceFullRebuild = true;
 					RebuildGeneratedActors();
 				}
@@ -259,8 +258,117 @@ const FRoadNetworkLink* ARoadNetworkActor::FindLink(const FGuid& LinkId) const
 
 void ARoadNetworkActor::SetSelection(const FGuid& PointId, const FGuid& LinkId)
 {
-	SelectedPointId = PointId;
-	SelectedLinkId = LinkId;
+	TArray<FGuid> PointIds;
+	TArray<FGuid> LinkIds;
+	if (PointId.IsValid())
+	{
+		PointIds.Add(PointId);
+	}
+	if (LinkId.IsValid())
+	{
+		LinkIds.Add(LinkId);
+	}
+	SetSelection(PointIds, LinkIds);
+}
+
+void ARoadNetworkActor::SetSelection(
+	const TArray<FGuid>& PointIds,
+	const TArray<FGuid>& LinkIds)
+{
+	SelectedPointIds.Reset();
+	for (const FGuid& PointId : PointIds)
+	{
+		if (PointId.IsValid() && FindPoint(PointId))
+		{
+			SelectedPointIds.AddUnique(PointId);
+		}
+	}
+
+	SelectedLinkIds.Reset();
+	for (const FGuid& LinkId : LinkIds)
+	{
+		if (LinkId.IsValid() && FindLink(LinkId))
+		{
+			SelectedLinkIds.AddUnique(LinkId);
+		}
+	}
+	RefreshSelectionAliases();
+}
+
+void ARoadNetworkActor::RefreshSelectionAliases()
+{
+	SelectedPointId = SelectedPointIds.IsEmpty()
+		? FGuid()
+		: SelectedPointIds[0];
+	SelectedLinkId = SelectedLinkIds.IsEmpty()
+		? FGuid()
+		: SelectedLinkIds[0];
+}
+
+bool ARoadNetworkActor::IsPointSelected(const FGuid& PointId) const
+{
+	return SelectedPointIds.Contains(PointId);
+}
+
+bool ARoadNetworkActor::IsLinkSelected(const FGuid& LinkId) const
+{
+	return SelectedLinkIds.Contains(LinkId);
+}
+
+const TArray<FGuid>& ARoadNetworkActor::GetSelectedPointIds() const
+{
+	return SelectedPointIds;
+}
+
+const TArray<FGuid>& ARoadNetworkActor::GetSelectedLinkIds() const
+{
+	return SelectedLinkIds;
+}
+
+bool ARoadNetworkActor::MoveSelectedElementsBy(const FVector& WorldDelta)
+{
+	TArray<FGuid> PointIds = SelectedPointIds;
+	for (const FGuid& LinkId : SelectedLinkIds)
+	{
+		const FRoadNetworkLink* Link = FindLink(LinkId);
+		if (Link)
+		{
+			PointIds.AddUnique(Link->StartPointId);
+			PointIds.AddUnique(Link->EndPointId);
+		}
+	}
+
+	bool bMoved = false;
+	for (const FGuid& PointId : PointIds)
+	{
+		FRoadNetworkPoint* Point = Points.FindByPredicate(
+			[PointId](const FRoadNetworkPoint& Candidate)
+			{
+				return Candidate.Id == PointId;
+			});
+		if (!Point)
+		{
+			continue;
+		}
+
+		FVector LandscapeLocation;
+		if (!ProjectToLandscape(Point->WorldLocation + WorldDelta, LandscapeLocation))
+		{
+			continue;
+		}
+		if (Point->WorldLocation.Equals(LandscapeLocation))
+		{
+			continue;
+		}
+		if (!bMoved)
+		{
+			Modify();
+			bMoved = true;
+		}
+		Point->WorldLocation = LandscapeLocation;
+		MarkPointConnectionsDirty(PointId);
+	}
+	return bMoved;
 }
 
 FGuid ARoadNetworkActor::GetSelectedPointId() const
@@ -2231,15 +2339,47 @@ bool ARoadNetworkActor::DeleteLink(const FGuid& LinkId)
 
 bool ARoadNetworkActor::DeleteSelection()
 {
-	if (SelectedPointId.IsValid())
+	if (SelectedPointIds.Num() == 1 && SelectedLinkIds.IsEmpty())
 	{
-		return DeletePoint(SelectedPointId);
+		return DeletePoint(SelectedPointIds[0]);
 	}
-	if (SelectedLinkId.IsValid())
+	if (SelectedLinkIds.Num() == 1 && SelectedPointIds.IsEmpty())
 	{
-		return DeleteLink(SelectedLinkId);
+		return DeleteLink(SelectedLinkIds[0]);
 	}
-	return false;
+	if (SelectedPointIds.IsEmpty() && SelectedLinkIds.IsEmpty())
+	{
+		return false;
+	}
+
+	TSet<FGuid> PointIdsToDelete;
+	for (const FGuid& PointId : SelectedPointIds)
+	{
+		PointIdsToDelete.Add(PointId);
+	}
+	TSet<FGuid> LinkIdsToDelete;
+	for (const FGuid& LinkId : SelectedLinkIds)
+	{
+		LinkIdsToDelete.Add(LinkId);
+	}
+	Modify();
+	bForceFullRebuild = true;
+	Links.RemoveAll(
+		[&PointIdsToDelete, &LinkIdsToDelete](const FRoadNetworkLink& Link)
+		{
+			return LinkIdsToDelete.Contains(Link.Id)
+				|| PointIdsToDelete.Contains(Link.StartPointId)
+				|| PointIdsToDelete.Contains(Link.EndPointId);
+		});
+	Points.RemoveAll(
+		[&PointIdsToDelete](const FRoadNetworkPoint& Point)
+		{
+			return PointIdsToDelete.Contains(Point.Id);
+		});
+	RemoveIsolatedPoints();
+	SetSelection(FGuid(), FGuid());
+	RebuildGeneratedActors();
+	return true;
 }
 
 bool ARoadNetworkActor::AdoptSelectedRoads()

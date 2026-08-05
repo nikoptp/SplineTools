@@ -5,6 +5,7 @@
 #include "RoadNetworkActor.h"
 #include "RoadPaintingLandscapeQuery.h"
 #include "RoadPaintingEditorMode.h"
+#include "SceneView.h"
 #include "SceneManagement.h"
 #include "ScopedTransaction.h"
 
@@ -116,6 +117,67 @@ void URoadSelectTool::SelectAtLocation(const FVector& WorldLocation)
 	Network->SetSelection(BestPointId, BestLinkId);
 }
 
+bool URoadSelectTool::ProjectWorldToScreen(
+	const FVector& WorldLocation,
+	FVector2D& OutScreenLocation) const
+{
+	return bHasCachedView
+		&& FSceneView::ProjectWorldToScreen(
+			WorldLocation,
+			CachedViewRect,
+			CachedViewProjectionMatrix,
+			OutScreenLocation,
+			true);
+}
+
+void URoadSelectTool::SelectInScreenRect(const FBox2D& ScreenRect)
+{
+	ARoadNetworkActor* Network = FindNetwork();
+	if (!Network)
+	{
+		return;
+	}
+
+	TArray<FGuid> PointIds;
+	for (const FRoadNetworkPoint& Point : Network->GetPoints())
+	{
+		FVector2D ScreenLocation;
+		if (ProjectWorldToScreen(Point.WorldLocation, ScreenLocation)
+			&& ScreenRect.IsInside(ScreenLocation))
+		{
+			PointIds.Add(Point.Id);
+		}
+	}
+
+	TArray<FGuid> LinkIds;
+	for (const FRoadNetworkLink& Link : Network->GetLinks())
+	{
+		TArray<FVector> LinkSamples;
+		Network->GetLinkWorldSamples(Link, LinkSamples);
+		for (const FVector& LinkSample : LinkSamples)
+		{
+			FVector2D ScreenLocation;
+			if (ProjectWorldToScreen(LinkSample, ScreenLocation)
+				&& ScreenRect.IsInside(ScreenLocation))
+			{
+				LinkIds.Add(Link.Id);
+				break;
+			}
+		}
+	}
+
+	Network->SetSelection(PointIds, LinkIds);
+}
+
+void URoadSelectTool::ResetDragState()
+{
+	bMovingSelection = false;
+	bMarqueeSelecting = false;
+	bMovedSelection = false;
+	bHasMarqueeScreenPosition = false;
+	MoveTransaction.Reset();
+}
+
 void URoadSelectTool::FindClosestElement(
 	const FVector& WorldLocation,
 	FGuid& OutPointId,
@@ -173,16 +235,40 @@ void URoadSelectTool::OnClickPress(const FInputDeviceRay& PressPos)
 	{
 		return;
 	}
-	SelectAtLocation(HitLocation);
-	if (ARoadNetworkActor* Network = FindNetwork())
+
+	ARoadNetworkActor* Network = FindNetwork();
+	if (!Network)
 	{
-		if (Network->GetSelectedPointId().IsValid())
+		return;
+	}
+
+	FGuid PointId;
+	FGuid LinkId;
+	FindClosestElement(HitLocation, PointId, LinkId);
+	if (PointId.IsValid() || LinkId.IsValid())
+	{
+		if (!Network->IsPointSelected(PointId)
+			&& !Network->IsLinkSelected(LinkId))
 		{
-			MoveTransaction = MakeUnique<FScopedTransaction>(
-				LOCTEXT("MoveRoadPoint", "Move Road Point"));
-			Network->Modify();
-			bMovingPoint = true;
+			Network->SetSelection(PointId, LinkId);
 		}
+
+		MoveTransaction = MakeUnique<FScopedTransaction>(
+			LOCTEXT("MoveRoadSelection", "Move Road Selection"));
+		Network->Modify();
+		bMovingSelection = true;
+		bMovedSelection = false;
+		CursorLocation = HitLocation;
+		return;
+	}
+
+	if (PressPos.bHas2D)
+	{
+		bMarqueeSelecting = true;
+		bMovedSelection = false;
+		MarqueeStartScreen = PressPos.ScreenPosition;
+		MarqueeEndScreen = PressPos.ScreenPosition;
+		bHasMarqueeScreenPosition = true;
 	}
 }
 
@@ -190,37 +276,65 @@ void URoadSelectTool::OnClickDrag(const FInputDeviceRay& DragPos)
 {
 	ARoadNetworkActor* Network = FindNetwork();
 	FVector HitLocation;
-	if (bMovingPoint && Network
+	if (bMovingSelection && Network
 		&& FindLandscapeHit(DragPos.WorldRay, HitLocation).bHit)
 	{
-		Network->MovePointToLandscape(Network->GetSelectedPointId(), HitLocation);
+		bMovedSelection |= Network->MoveSelectedElementsBy(
+			HitLocation - CursorLocation);
+		CursorLocation = HitLocation;
+		return;
+	}
+
+	if (bMarqueeSelecting && DragPos.bHas2D)
+	{
+		MarqueeEndScreen = DragPos.ScreenPosition;
+		bMovedSelection |= !MarqueeStartScreen.Equals(
+			MarqueeEndScreen,
+			4.0f);
+		bHasMarqueeScreenPosition = true;
 	}
 }
 
 void URoadSelectTool::OnClickRelease(const FInputDeviceRay& ReleasePos)
 {
-	if (bMovingPoint)
+	ARoadNetworkActor* Network = FindNetwork();
+	if (bMovingSelection)
 	{
-		if (ARoadNetworkActor* Network = FindNetwork())
+		if (bMovedSelection && Network)
 		{
 			Network->RebuildDirty();
 		}
 	}
-	bMovingPoint = false;
-	MoveTransaction.Reset();
+	else if (bMarqueeSelecting && Network)
+	{
+		if (bMovedSelection && bHasMarqueeScreenPosition)
+		{
+			const FVector2D SelectionMin(
+				FMath::Min(MarqueeStartScreen.X, MarqueeEndScreen.X),
+				FMath::Min(MarqueeStartScreen.Y, MarqueeEndScreen.Y));
+			const FVector2D SelectionMax(
+				FMath::Max(MarqueeStartScreen.X, MarqueeEndScreen.X),
+				FMath::Max(MarqueeStartScreen.Y, MarqueeEndScreen.Y));
+			SelectInScreenRect(FBox2D(SelectionMin, SelectionMax));
+		}
+		else
+		{
+			Network->SetSelection(FGuid(), FGuid());
+		}
+	}
+	ResetDragState();
 }
 
 void URoadSelectTool::OnTerminateDragSequence()
 {
-	if (bMovingPoint)
+	if (bMovingSelection && bMovedSelection)
 	{
 		if (ARoadNetworkActor* Network = FindNetwork())
 		{
 			Network->RebuildDirty();
 		}
 	}
-	bMovingPoint = false;
-	MoveTransaction.Reset();
+	ResetDragState();
 }
 
 void URoadSelectTool::OnUpdateModifierState(int ModifierID, bool bIsOn)
@@ -287,7 +401,14 @@ void URoadSelectTool::OnMouseWheelScrollDown(const FInputDeviceRay& CurrentPos)
 void URoadSelectTool::Render(IToolsContextRenderAPI* RenderAPI)
 {
 	ARoadNetworkActor* Network = FindNetwork();
-	if (!Network)
+	const FSceneView* SceneView = RenderAPI ? RenderAPI->GetSceneView() : nullptr;
+	if (SceneView)
+	{
+		CachedViewProjectionMatrix = SceneView->ViewMatrices.GetViewProjectionMatrix();
+		CachedViewRect = SceneView->UnscaledViewRect;
+		bHasCachedView = true;
+	}
+	if (!Network || !RenderAPI)
 	{
 		return;
 	}
@@ -296,7 +417,7 @@ void URoadSelectTool::Render(IToolsContextRenderAPI* RenderAPI)
 	{
 		TArray<FVector> LinkSamples;
 		Network->GetLinkWorldSamples(Link, LinkSamples);
-		const bool bSelected = Link.Id == Network->GetSelectedLinkId();
+		const bool bSelected = Network->IsLinkSelected(Link.Id);
 		const bool bHovered = Link.Id == HoverLinkId;
 		for (int32 SampleIndex = 0; SampleIndex + 1 < LinkSamples.Num(); ++SampleIndex)
 		{
@@ -310,13 +431,59 @@ void URoadSelectTool::Render(IToolsContextRenderAPI* RenderAPI)
 	}
 	for (const FRoadNetworkPoint& Point : Network->GetPoints())
 	{
-		const bool bSelected = Point.Id == Network->GetSelectedPointId();
+		const bool bSelected = Network->IsPointSelected(Point.Id);
 		const bool bHovered = Point.Id == HoverPointId;
 		PDI->DrawPoint(
 			Point.WorldLocation,
 			bSelected ? FColor::Yellow : bHovered ? FColor::Orange : FColor::Cyan,
 			bSelected ? 18.0f : bHovered ? 15.0f : 10.0f,
 			SDPG_Foreground);
+	}
+	if (bMarqueeSelecting && bHasMarqueeScreenPosition && SceneView)
+	{
+		const FVector2D SelectionMin(
+			FMath::Min(MarqueeStartScreen.X, MarqueeEndScreen.X),
+			FMath::Min(MarqueeStartScreen.Y, MarqueeEndScreen.Y));
+		const FVector2D SelectionMax(
+			FMath::Max(MarqueeStartScreen.X, MarqueeEndScreen.X),
+			FMath::Max(MarqueeStartScreen.Y, MarqueeEndScreen.Y));
+		const TArray<FVector2D> ScreenCorners =
+		{
+			SelectionMin,
+			FVector2D(SelectionMax.X, SelectionMin.Y),
+			SelectionMax,
+			FVector2D(SelectionMin.X, SelectionMax.Y)
+		};
+		TArray<FVector> WorldCorners;
+		WorldCorners.Reserve(ScreenCorners.Num());
+		for (const FVector2D& ScreenCorner : ScreenCorners)
+		{
+			FVector WorldOrigin;
+			FVector WorldDirection;
+			SceneView->DeprojectFVector2D(
+				ScreenCorner,
+				WorldOrigin,
+				WorldDirection);
+			FVector SurfaceLocation = WorldOrigin
+				+ WorldDirection * 1000000.0f;
+			float HitDistance = 0.0f;
+			RoadPaintingLandscapeQuery::FindSurfaceAlongSegment(
+				TargetWorld,
+				WorldOrigin,
+				SurfaceLocation,
+				SurfaceLocation,
+				HitDistance);
+			WorldCorners.Add(SurfaceLocation);
+		}
+		for (int32 CornerIndex = 0; CornerIndex < WorldCorners.Num(); ++CornerIndex)
+		{
+			PDI->DrawLine(
+				WorldCorners[CornerIndex],
+				WorldCorners[(CornerIndex + 1) % WorldCorners.Num()],
+				FColor(80, 180, 255),
+				SDPG_Foreground,
+				2.0f);
+		}
 	}
 	if (bHasCursor)
 	{

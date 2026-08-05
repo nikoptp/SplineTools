@@ -254,6 +254,45 @@ bool FRoadPaintInsertPointTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRoadPaintMultiSelectionTest,
+	"SplineTools.RoadPainting.SupportsMultiSelection",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadPaintMultiSelectionTest::RunTest(const FString& Parameters)
+{
+	FScopedRoadTestWorld TestWorld;
+	ARoadNetworkActor* Network = TestWorld.SpawnNetwork();
+	Network->SimplificationTolerance = 0.0f;
+	TestTrue(
+		TEXT("Road stroke was accepted"),
+		Network->AddPaintedStroke(
+			{
+				FVector(0.0f, 0.0f, 0.0f),
+				FVector(500.0f, 200.0f, 0.0f),
+				FVector(1000.0f, 0.0f, 0.0f)
+			},
+			AProceduralRoadActor::StaticClass()));
+	TestEqual(TEXT("Test road has three control points"), Network->GetPoints().Num(), 3);
+
+	const FGuid FirstPointId = Network->GetPoints()[0].Id;
+	const FGuid SecondPointId = Network->GetPoints()[1].Id;
+	const FGuid FirstLinkId = Network->GetLinks()[0].Id;
+	Network->SetSelection(
+		{FirstPointId, SecondPointId},
+		{FirstLinkId});
+	TestEqual(TEXT("Multi-selection stores two points"), Network->GetSelectedPointIds().Num(), 2);
+	TestEqual(TEXT("Multi-selection stores one link"), Network->GetSelectedLinkIds().Num(), 1);
+	TestTrue(TEXT("First point is selected"), Network->IsPointSelected(FirstPointId));
+	TestTrue(TEXT("Link is selected"), Network->IsLinkSelected(FirstLinkId));
+
+	Network->SetSelection({FirstPointId, SecondPointId}, {});
+	TestTrue(TEXT("Multi-selection can be deleted as one operation"), Network->DeleteSelection());
+	TestEqual(TEXT("Deleting selected points removes connected links"), Network->GetLinks().Num(), 0);
+	TestEqual(TEXT("Deleting selected points removes isolated points"), Network->GetPoints().Num(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRoadPaintContinuousRunTest,
 	"SplineTools.RoadPainting.MergesSameClassDegreeTwoRun",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

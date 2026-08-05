@@ -175,6 +175,14 @@ public:
 		TArray<FVector>& OutWorldPoints) const;
 
 	void SetSelection(const FGuid& PointId, const FGuid& LinkId);
+	void SetSelection(
+		const TArray<FGuid>& PointIds,
+		const TArray<FGuid>& LinkIds);
+	bool IsPointSelected(const FGuid& PointId) const;
+	bool IsLinkSelected(const FGuid& LinkId) const;
+	const TArray<FGuid>& GetSelectedPointIds() const;
+	const TArray<FGuid>& GetSelectedLinkIds() const;
+	bool MoveSelectedElementsBy(const FVector& WorldDelta);
 	FGuid GetSelectedPointId() const;
 	FGuid GetSelectedLinkId() const;
 	const TArray<FRoadNetworkPoint>& GetPoints() const;
@@ -265,6 +273,7 @@ private:
 	void ScheduleLandscapeMaterialPaintRebuild();
 	void CancelLandscapePaintUpdate();
 	void ScheduleLandscapePaintUpdate();
+	void RefreshSelectionAliases();
 	void FindLoadedManagedActors(
 		TArray<AProceduralRoadActor*>& OutRoadActors,
 		TArray<AProceduralRoadJunctionActor*>& OutJunctionActors) const;
@@ -321,6 +330,12 @@ private:
 
 	UPROPERTY(Transient)
 	FGuid SelectedLinkId;
+
+	UPROPERTY(Transient)
+	TArray<FGuid> SelectedPointIds;
+
+	UPROPERTY(Transient)
+	TArray<FGuid> SelectedLinkIds;
 
 	UPROPERTY(Transient)
 	TSet<FGuid> DirtyLinkIds;
