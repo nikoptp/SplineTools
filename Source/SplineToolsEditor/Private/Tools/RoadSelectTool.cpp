@@ -2,8 +2,8 @@
 
 #include "Engine/World.h"
 #include "InteractiveToolManager.h"
-#include "LandscapeProxy.h"
 #include "RoadNetworkActor.h"
+#include "RoadPaintingLandscapeQuery.h"
 #include "RoadPaintingEditorMode.h"
 #include "SceneManagement.h"
 #include "ScopedTransaction.h"
@@ -56,6 +56,16 @@ void URoadSelectTool::Setup()
 	UClickDragInputBehavior* MouseBehavior = NewObject<UClickDragInputBehavior>();
 	MouseBehavior->Initialize(this);
 	AddInputBehavior(MouseBehavior);
+	UMouseHoverBehavior* HoverBehavior = NewObject<UMouseHoverBehavior>();
+	HoverBehavior->Initialize(this);
+	AddInputBehavior(HoverBehavior);
+	UMouseWheelInputBehavior* WheelBehavior = NewObject<UMouseWheelInputBehavior>();
+	WheelBehavior->Initialize(this);
+	WheelBehavior->ModifierCheckFunc = [](const FInputDeviceState& InputState)
+	{
+		return FInputDeviceState::IsShiftKeyDown(InputState);
+	};
+	AddInputBehavior(WheelBehavior);
 	Properties = NewObject<URoadSelectToolProperties>(this);
 	AddToolPropertySource(Properties);
 }
@@ -73,21 +83,15 @@ FInputRayHit URoadSelectTool::FindLandscapeHit(
 	{
 		return FInputRayHit();
 	}
-	TArray<FHitResult> Hits;
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(RoadSelectTool), true);
-	TargetWorld->LineTraceMultiByChannel(
-		Hits,
+	float HitDistance = 0.0f;
+	if (RoadPaintingLandscapeQuery::FindSurfaceAlongSegment(
+		TargetWorld,
 		WorldRay.Origin,
 		WorldRay.PointAt(1000000.0f),
-		ECC_Visibility,
-		QueryParams);
-	for (const FHitResult& Hit : Hits)
+		OutLocation,
+		HitDistance))
 	{
-		if (Hit.GetActor() && Hit.GetActor()->IsA<ALandscapeProxy>())
-		{
-			OutLocation = Hit.ImpactPoint;
-			return FInputRayHit(Hit.Distance);
-		}
+		return FInputRayHit(HitDistance);
 	}
 	return FInputRayHit();
 }
@@ -106,9 +110,27 @@ void URoadSelectTool::SelectAtLocation(const FVector& WorldLocation)
 	{
 		return;
 	}
+	FGuid BestPointId;
+	FGuid BestLinkId;
+	FindClosestElement(WorldLocation, BestPointId, BestLinkId);
+	Network->SetSelection(BestPointId, BestLinkId);
+}
+
+void URoadSelectTool::FindClosestElement(
+	const FVector& WorldLocation,
+	FGuid& OutPointId,
+	FGuid& OutLinkId) const
+{
+	OutPointId.Invalidate();
+	OutLinkId.Invalidate();
+	ARoadNetworkActor* Network = FindNetwork();
+	if (!Network)
+	{
+		return;
+	}
+
 	const float RadiusSquared = FMath::Square(Properties->SelectionRadius);
 	float BestDistanceSquared = RadiusSquared;
-	FGuid BestPointId;
 	for (const FRoadNetworkPoint& Point : Network->GetPoints())
 	{
 		const float DistanceSquared = FVector2D::DistSquared(
@@ -117,16 +139,14 @@ void URoadSelectTool::SelectAtLocation(const FVector& WorldLocation)
 		if (DistanceSquared < BestDistanceSquared)
 		{
 			BestDistanceSquared = DistanceSquared;
-			BestPointId = Point.Id;
+			OutPointId = Point.Id;
 		}
 	}
-	if (BestPointId.IsValid())
+	if (OutPointId.IsValid())
 	{
-		Network->SetSelection(BestPointId, FGuid());
 		return;
 	}
 
-	FGuid BestLinkId;
 	for (const FRoadNetworkLink& Link : Network->GetLinks())
 	{
 		TArray<FVector> LinkSamples;
@@ -140,11 +160,10 @@ void URoadSelectTool::SelectAtLocation(const FVector& WorldLocation)
 			if (DistanceSquared < BestDistanceSquared)
 			{
 				BestDistanceSquared = DistanceSquared;
-				BestLinkId = Link.Id;
+				OutLinkId = Link.Id;
 			}
 		}
 	}
-	Network->SetSelection(FGuid(), BestLinkId);
 }
 
 void URoadSelectTool::OnClickPress(const FInputDeviceRay& PressPos)
@@ -208,6 +227,63 @@ void URoadSelectTool::OnUpdateModifierState(int ModifierID, bool bIsOn)
 {
 }
 
+FInputRayHit URoadSelectTool::BeginHoverSequenceHitTest(
+	const FInputDeviceRay& PressPos)
+{
+	FVector HitLocation;
+	return FindNetwork()
+		? FindLandscapeHit(PressPos.WorldRay, HitLocation)
+		: FInputRayHit();
+}
+
+void URoadSelectTool::OnBeginHover(const FInputDeviceRay& DevicePos)
+{
+	OnUpdateHover(DevicePos);
+}
+
+bool URoadSelectTool::OnUpdateHover(const FInputDeviceRay& DevicePos)
+{
+	FVector HitLocation;
+	if (!FindLandscapeHit(DevicePos.WorldRay, HitLocation).bHit)
+	{
+		OnEndHover();
+		return false;
+	}
+
+	CursorLocation = HitLocation;
+	bHasCursor = true;
+	FindClosestElement(CursorLocation, HoverPointId, HoverLinkId);
+	return true;
+}
+
+void URoadSelectTool::OnEndHover()
+{
+	bHasCursor = false;
+	HoverPointId.Invalidate();
+	HoverLinkId.Invalidate();
+}
+
+FInputRayHit URoadSelectTool::ShouldRespondToMouseWheel(
+	const FInputDeviceRay& CurrentPos)
+{
+	FVector HitLocation;
+	return FindLandscapeHit(CurrentPos.WorldRay, HitLocation).bHit
+		? FInputRayHit(1.0f)
+		: FInputRayHit();
+}
+
+void URoadSelectTool::OnMouseWheelScrollUp(const FInputDeviceRay& CurrentPos)
+{
+	Properties->SelectionRadius = FMath::Clamp(Properties->SelectionRadius + 50.0f, 10.0f, 10000.0f);
+	OnUpdateHover(CurrentPos);
+}
+
+void URoadSelectTool::OnMouseWheelScrollDown(const FInputDeviceRay& CurrentPos)
+{
+	Properties->SelectionRadius = FMath::Clamp(Properties->SelectionRadius - 50.0f, 10.0f, 10000.0f);
+	OnUpdateHover(CurrentPos);
+}
+
 void URoadSelectTool::Render(IToolsContextRenderAPI* RenderAPI)
 {
 	ARoadNetworkActor* Network = FindNetwork();
@@ -221,24 +297,38 @@ void URoadSelectTool::Render(IToolsContextRenderAPI* RenderAPI)
 		TArray<FVector> LinkSamples;
 		Network->GetLinkWorldSamples(Link, LinkSamples);
 		const bool bSelected = Link.Id == Network->GetSelectedLinkId();
+		const bool bHovered = Link.Id == HoverLinkId;
 		for (int32 SampleIndex = 0; SampleIndex + 1 < LinkSamples.Num(); ++SampleIndex)
 		{
 			PDI->DrawLine(
 				LinkSamples[SampleIndex],
 				LinkSamples[SampleIndex + 1],
-				bSelected ? FColor::Yellow : FColor(70, 180, 255),
+				bSelected ? FColor::Yellow : bHovered ? FColor::Orange : FColor(70, 180, 255),
 				SDPG_Foreground,
-				bSelected ? 6.0f : 2.0f);
+				bSelected ? 6.0f : bHovered ? 4.0f : 2.0f);
 		}
 	}
 	for (const FRoadNetworkPoint& Point : Network->GetPoints())
 	{
 		const bool bSelected = Point.Id == Network->GetSelectedPointId();
+		const bool bHovered = Point.Id == HoverPointId;
 		PDI->DrawPoint(
 			Point.WorldLocation,
-			bSelected ? FColor::Yellow : FColor::Cyan,
-			bSelected ? 18.0f : 10.0f,
+			bSelected ? FColor::Yellow : bHovered ? FColor::Orange : FColor::Cyan,
+			bSelected ? 18.0f : bHovered ? 15.0f : 10.0f,
 			SDPG_Foreground);
+	}
+	if (bHasCursor)
+	{
+		DrawWireSphere(
+			PDI,
+			CursorLocation,
+			HoverPointId.IsValid() || HoverLinkId.IsValid() ? FColor::Orange : FColor::White,
+			Properties->SelectionRadius,
+			24,
+			SDPG_Foreground,
+			1.0f);
+		PDI->DrawPoint(CursorLocation, FColor::White, 8.0f, SDPG_Foreground);
 	}
 }
 

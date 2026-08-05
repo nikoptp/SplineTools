@@ -10,7 +10,8 @@ public class SplineToolsEditor : ModuleRules
 			new string[]
 			{
 				"Core",
-				"SplineTools"
+				"SplineTools",
+				"Landscape"
 			});
 
 		PrivateDependencyModuleNames.AddRange(
@@ -28,7 +29,6 @@ public class SplineToolsEditor : ModuleRules
 				"InteractiveToolsFramework",
 				"EditorInteractiveToolsFramework",
 				"PropertyEditor",
-				"Landscape",
 				"ProceduralMeshComponent"
 			});
 	}

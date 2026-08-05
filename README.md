@@ -165,6 +165,9 @@ future extensions.
 
 Open **Select Mode > Road Painting** and use **Draw** to drag a route directly
 over Landscape actors. The brush ignores roads, junctions, buildings, and props.
+Brush targeting retries simple and world-static collision, then loaded editor
+Landscape heightfield data, so differing streamed-cell collision responses do
+not release the mouse drag to normal viewport camera controls.
 While dragging, the viewport shows the sampled route, simplified preview, snap
 target, and prospective intersections. Generated actors are created only when
 the stroke is released.
@@ -185,10 +188,35 @@ The default authoring tolerances are:
 - 200 cm maximum junction height difference.
 
 Use **Select/Move** to select graph points or links and drag points across the
-landscape. **Delete** removes the selected graph element, **Rebuild Dirty** and
-**Rebuild All** refresh managed output, and **Validate** reports graph or actor
-reference problems. Authoring operations use editor transactions and support
-undo and redo.
+landscape. The Road Painting toolkit shows the active network, point/link/
+junction counts, pending rebuild state, and action buttons for **Delete**,
+**Adopt Selected**, **Rebuild Dirty**, **Rebuild All**, **Validate**, **Frame**,
+and **Insert Point**. **D** switches to Draw, **S** switches to Select/Move,
+**F** frames the current network or selection, and **Escape** cancels the
+current interaction. Hovering shows the surface cursor and selection target;
+hold **Shift** and use the mouse wheel to adjust the Draw snap radius or Select
+selection radius. Authoring operations use editor transactions and support
+undo and redo. Undo/redo and explicit rebuilds reconcile all loaded actors with
+the network GUID, removing managed road or junction actors whose graph ownership
+was restored away by a transaction.
+
+Each procedural road Blueprint can optionally define its own Landscape material
+paint profile under **Road > Landscape Paint**. Enable the profile in the road
+Blueprint Class Defaults, assign a Landscape Layer Info asset, choose a dedicated
+edit-layer name such as `RoadPainting`, and set the full paint width and side
+falloff. **Rebuild Dirty** or **Rebuild All** synchronizes editor-only Landscape
+brush actors managed by the road network. One brush is created for each loaded
+Landscape/edit-layer combination, and changing or deleting roads updates that
+non-destructive brush contribution. Mixed road Blueprint classes can paint
+different material layers and widths in one network.
+
+The target Landscape must have Edit Layers enabled, and the Layer Info name must
+exist in its Landscape material. The brush copies Unreal's existing combined
+weightmap and composites only the road width and falloff area; it never clears
+or replaces the complete material layer. A non-weight-blended Layer Info paired
+with an alpha-blended Landscape material layer remains the recommended authoring
+setup for road masks. The result is editor-authored Landscape data and must be
+saved/cooked with the map; no runtime Landscape mutation is performed.
 
 **Adopt Selected Roads** imports only the explicitly selected procedural road
 actors and optional selected junctions. Adoption preserves each road actor,

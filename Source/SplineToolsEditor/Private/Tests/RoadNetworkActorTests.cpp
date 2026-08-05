@@ -4,13 +4,16 @@
 
 #include "Components/BoxComponent.h"
 #include "Editor.h"
+#include "Engine/Engine.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
 #include "ProceduralRoadActor.h"
 #include "ProceduralRoadJunctionActor.h"
 #include "ProceduralMeshComponent.h"
 #include "RoadNetworkActor.h"
+#include "ScopedTransaction.h"
 #include "Tests/RoadNetworkTestTypes.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -26,10 +29,13 @@ namespace
 					GetTransientPackage(),
 					UWorld::StaticClass(),
 					TEXT("RoadPaintingTestWorld")));
+			FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::EditorPreview);
+			WorldContext.SetCurrentWorld(World);
 		}
 
 		~FScopedRoadTestWorld()
 		{
+			GEngine->DestroyWorldContext(World);
 			World->DestroyWorld(false);
 		}
 
@@ -46,6 +52,15 @@ namespace
 				++Count;
 			}
 			return Count;
+		}
+
+		AProceduralRoadActor* FindRoadActor() const
+		{
+			for (TActorIterator<AProceduralRoadActor> Iterator(World); Iterator; ++Iterator)
+			{
+				return *Iterator;
+			}
+			return nullptr;
 		}
 
 		AProceduralRoadJunctionActor* FindJunctionActor() const
@@ -115,6 +130,87 @@ bool FRoadPaintSimplificationTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRoadPaintUndoRemovesGeneratedActorsTest,
+	"SplineTools.RoadPainting.UndoRemovesGeneratedActors",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadPaintUndoRemovesGeneratedActorsTest::RunTest(const FString& Parameters)
+{
+	FScopedRoadTestWorld TestWorld;
+	ARoadNetworkActor* Network = TestWorld.SpawnNetwork();
+	{
+		const FScopedTransaction Transaction(
+			NSLOCTEXT("RoadPaintingTests", "PaintRoadStroke", "Paint Road Stroke"));
+		TestTrue(
+			TEXT("Stroke was accepted"),
+			Network->AddPaintedStroke(
+				{FVector::ZeroVector, FVector(1000.0f, 0.0f, 0.0f)},
+				AProceduralRoadActor::StaticClass()));
+	}
+	TestEqual(TEXT("Stroke generated one road"), TestWorld.CountRoadActors(), 1);
+	AProceduralRoadActor* ManagedRoad = TestWorld.FindRoadActor();
+	FStructProperty* ManagedNetworkProperty = FindFProperty<FStructProperty>(
+		AProceduralRoadActor::StaticClass(),
+		TEXT("ManagedRoadNetworkId"));
+	TestNotNull(TEXT("Managed road exposes its network identity"), ManagedNetworkProperty);
+	if (ManagedRoad && ManagedNetworkProperty)
+	{
+		const FGuid* ManagedNetworkId =
+			ManagedNetworkProperty->ContainerPtrToValuePtr<FGuid>(ManagedRoad);
+		AProceduralRoadActor* OrphanRoad =
+			Network->GetWorld()->SpawnActor<AProceduralRoadActor>();
+		OrphanRoad->SetManagedRoadIdentity(*ManagedNetworkId, FGuid::NewGuid());
+		TestEqual(TEXT("Test setup created a managed orphan"), TestWorld.CountRoadActors(), 2);
+		Network->RebuildAll();
+		TestEqual(TEXT("Manual rebuild removes a managed orphan"), TestWorld.CountRoadActors(), 1);
+	}
+
+	GEditor->UndoTransaction();
+	TestEqual(TEXT("Undo restored an empty graph"), Network->GetLinks().Num(), 0);
+	FTSTicker::GetCoreTicker().Tick(0.1f);
+	TestEqual(TEXT("Undo automatically removes the generated road"), TestWorld.CountRoadActors(), 0);
+
+	GEditor->RedoTransaction();
+	FTSTicker::GetCoreTicker().Tick(0.1f);
+	TestEqual(TEXT("Redo restored the graph"), Network->GetLinks().Num(), 1);
+	TestEqual(TEXT("Redo regenerated the road"), TestWorld.CountRoadActors(), 1);
+
+	GEditor->UndoTransaction();
+	FTSTicker::GetCoreTicker().Tick(0.1f);
+	TestEqual(TEXT("A second undo remains clean"), TestWorld.CountRoadActors(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRoadPaintInsertPointTest,
+	"SplineTools.RoadPainting.InsertsPointOnSelectedLink",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadPaintInsertPointTest::RunTest(const FString& Parameters)
+{
+	FScopedRoadTestWorld TestWorld;
+	ARoadNetworkActor* Network = TestWorld.SpawnNetwork();
+	TestTrue(
+		TEXT("Road stroke was accepted"),
+		Network->AddPaintedStroke(
+			{FVector::ZeroVector, FVector(1000.0f, 0.0f, 0.0f)},
+			AProceduralRoadActor::StaticClass()));
+	Network->SetSelection(FGuid(), Network->GetLinks()[0].Id);
+
+	TestTrue(
+		TEXT("Selected link accepts inserted point"),
+		Network->InsertPointOnLink(Network->GetSelectedLinkId()));
+	TestEqual(TEXT("Inserted point splits the link into two links"), Network->GetLinks().Num(), 2);
+	TestTrue(TEXT("Inserted point is selected"), Network->GetSelectedPointId().IsValid());
+	TestTrue(TEXT("Inserted graph remains valid"), [&Network]()
+	{
+		FString Errors;
+		return Network->ValidateNetworkGraph(Errors);
+	}());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRoadPaintContinuousRunTest,
 	"SplineTools.RoadPainting.MergesSameClassDegreeTwoRun",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -133,6 +229,28 @@ bool FRoadPaintContinuousRunTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Connected strokes retain three points"), Network->GetPoints().Num(), 3);
 	TestEqual(TEXT("Connected strokes retain two links"), Network->GetLinks().Num(), 2);
 	TestEqual(TEXT("Degree-two same-class links generate one road"), TestWorld.CountRoadActors(), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRoadPaintLandscapeConfigurationTest,
+	"SplineTools.RoadPainting.ValidatesLandscapePaintConfiguration",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadPaintLandscapeConfigurationTest::RunTest(const FString& Parameters)
+{
+	TestNotNull(
+		TEXT("Landscape paint settings are owned by procedural road classes"),
+		FindFProperty<FProperty>(
+			AProceduralRoadActor::StaticClass(),
+			TEXT("LandscapePaintSettings")));
+	FProperty* LegacyNetworkToggle = FindFProperty<FProperty>(
+		ARoadNetworkActor::StaticClass(),
+		TEXT("bPaintLandscapeMaterial"));
+	TestNotNull(TEXT("Legacy network paint data remains loadable for serialization compatibility"), LegacyNetworkToggle);
+	TestFalse(
+		TEXT("Legacy network paint data is no longer editable"),
+		LegacyNetworkToggle && LegacyNetworkToggle->HasAnyPropertyFlags(CPF_Edit));
 	return true;
 }
 

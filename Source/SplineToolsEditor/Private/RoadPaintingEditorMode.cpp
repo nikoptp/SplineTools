@@ -1,9 +1,13 @@
 #include "RoadPaintingEditorMode.h"
 
 #include "Editor.h"
+#include "EditorModeManager.h"
 #include "EngineUtils.h"
 #include "Engine/Selection.h"
 #include "InteractiveToolManager.h"
+#include "LevelEditorViewport.h"
+#include "ProceduralRoadJunctionActor.h"
+#include "ProceduralRoadActor.h"
 #include "RoadNetworkActor.h"
 #include "RoadPaintingEditorModeCommands.h"
 #include "RoadPaintingEditorModeToolkit.h"
@@ -36,19 +40,35 @@ void URoadPaintingEditorMode::Enter()
 
 	Toolkit->GetToolkitCommands()->MapAction(
 		Commands.DeleteSelection,
-		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::DeleteSelection));
+		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::DeleteSelection),
+		FCanExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CanDeleteSelection));
 	Toolkit->GetToolkitCommands()->MapAction(
 		Commands.AdoptSelectedRoads,
-		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::AdoptSelectedRoads));
+		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::AdoptSelectedRoads),
+		FCanExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CanAdoptSelectedRoads));
 	Toolkit->GetToolkitCommands()->MapAction(
 		Commands.RebuildDirty,
-		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::RebuildDirty));
+		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::RebuildDirty),
+		FCanExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CanRebuild));
 	Toolkit->GetToolkitCommands()->MapAction(
 		Commands.RebuildAll,
-		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::RebuildAll));
+		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::RebuildAll),
+		FCanExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CanRebuild));
 	Toolkit->GetToolkitCommands()->MapAction(
 		Commands.Validate,
-		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::ValidateNetwork));
+		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::ValidateNetwork),
+		FCanExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CanRebuild));
+	Toolkit->GetToolkitCommands()->MapAction(
+		Commands.FrameNetwork,
+		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::FrameNetwork),
+		FCanExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CanFrameNetwork));
+	Toolkit->GetToolkitCommands()->MapAction(
+		Commands.InsertPoint,
+		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::InsertPoint),
+		FCanExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CanInsertPoint));
+	Toolkit->GetToolkitCommands()->MapAction(
+		Commands.CancelInteraction,
+		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CancelInteraction));
 	GetToolManager()->SelectActiveToolType(EToolSide::Left, DrawToolName);
 }
 
@@ -115,16 +135,25 @@ void URoadPaintingEditorMode::DeleteSelection()
 	if (ARoadNetworkActor* Network = FindRoadNetwork())
 	{
 		const FScopedTransaction Transaction(LOCTEXT("DeleteRoadSelection", "Delete Road Network Selection"));
-		Network->DeleteSelection();
+		LastOperationText = Network->DeleteSelection()
+			? LOCTEXT("DeletedSelection", "Deleted the selected road element.")
+			: LOCTEXT("DeleteSelectionFailed", "Nothing was selected.");
 	}
 }
 
 void URoadPaintingEditorMode::AdoptSelectedRoads()
 {
+	if (!CanAdoptSelectedRoads())
+	{
+		LastOperationText = LOCTEXT("NoRoadsToAdopt", "Select at least one procedural road to adopt.");
+		return;
+	}
 	const FScopedTransaction Transaction(LOCTEXT("AdoptRoads", "Adopt Selected Roads"));
 	if (ARoadNetworkActor* Network = GetOrCreateRoadNetwork())
 	{
-		Network->AdoptSelectedRoads();
+		LastOperationText = Network->AdoptSelectedRoads()
+			? LOCTEXT("AdoptedRoads", "Selected roads were adopted by the network.")
+			: LOCTEXT("AdoptRoadsFailed", "Selected roads could not be adopted.");
 	}
 }
 
@@ -135,6 +164,7 @@ void URoadPaintingEditorMode::RebuildDirty()
 		const FScopedTransaction Transaction(LOCTEXT("RebuildDirtyRoads", "Rebuild Dirty Roads"));
 		Network->Modify();
 		Network->RebuildDirty();
+		LastOperationText = LOCTEXT("RebuiltDirtyRoads", "Dirty road geometry was rebuilt.");
 	}
 }
 
@@ -145,6 +175,7 @@ void URoadPaintingEditorMode::RebuildAll()
 		const FScopedTransaction Transaction(LOCTEXT("RebuildAllRoads", "Rebuild All Roads"));
 		Network->Modify();
 		Network->RebuildAll();
+		LastOperationText = LOCTEXT("RebuiltAllRoads", "The complete road network was rebuilt.");
 	}
 }
 
@@ -152,8 +183,263 @@ void URoadPaintingEditorMode::ValidateNetwork()
 {
 	if (ARoadNetworkActor* Network = FindRoadNetwork())
 	{
-		Network->ValidateNetwork();
+		FString Errors;
+		if (Network->ValidateNetworkGraph(Errors))
+		{
+			LastValidationText = LOCTEXT("ValidationPassed", "Validation passed: the road network is valid.");
+			LastOperationText = LastValidationText;
+		}
+		else
+		{
+			LastValidationText = FText::Format(
+				LOCTEXT("ValidationFailed", "Validation found problems:\n{0}"),
+				FText::FromString(Errors));
+			LastOperationText = LastValidationText;
+		}
 	}
+}
+
+bool URoadPaintingEditorMode::CanDeleteSelection() const
+{
+	if (ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		return Network->GetSelectedPointId().IsValid()
+			|| Network->GetSelectedLinkId().IsValid();
+	}
+	return false;
+}
+
+bool URoadPaintingEditorMode::CanAdoptSelectedRoads() const
+{
+	if (!GEditor)
+	{
+		return false;
+	}
+	for (FSelectionIterator Iterator(*GEditor->GetSelectedActors()); Iterator; ++Iterator)
+	{
+		if (Cast<AProceduralRoadActor>(*Iterator)
+			|| Cast<AProceduralRoadJunctionActor>(*Iterator))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URoadPaintingEditorMode::CanRebuild() const
+{
+	return FindRoadNetwork() != nullptr;
+}
+
+bool URoadPaintingEditorMode::CanFrameNetwork() const
+{
+	if (ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		return !Network->GetPoints().IsEmpty();
+	}
+	return false;
+}
+
+bool URoadPaintingEditorMode::CanInsertPoint() const
+{
+	if (ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		return Network->GetSelectedLinkId().IsValid();
+	}
+	return false;
+}
+
+void URoadPaintingEditorMode::FrameNetwork()
+{
+	ARoadNetworkActor* Network = FindRoadNetwork();
+	FLevelEditorViewportClient* ViewportClient = GCurrentLevelEditingViewportClient;
+	if (!Network || !ViewportClient)
+	{
+		return;
+	}
+
+	FBox Bounds(ForceInit);
+	if (Network->GetSelectedPointId().IsValid())
+	{
+		if (const FRoadNetworkPoint* Point = Network->FindPoint(Network->GetSelectedPointId()))
+		{
+			Bounds += Point->WorldLocation;
+		}
+	}
+	else if (Network->GetSelectedLinkId().IsValid())
+	{
+		if (const FRoadNetworkLink* Link = Network->FindLink(Network->GetSelectedLinkId()))
+		{
+			TArray<FVector> LinkSamples;
+			Network->GetLinkWorldSamples(*Link, LinkSamples);
+			for (const FVector& Point : LinkSamples)
+			{
+				Bounds += Point;
+			}
+		}
+	}
+	else
+	{
+		for (const FRoadNetworkPoint& Point : Network->GetPoints())
+		{
+			Bounds += Point.WorldLocation;
+		}
+	}
+
+	if (Bounds.IsValid)
+	{
+		Bounds = Bounds.ExpandBy(1000.0f);
+		ViewportClient->FocusViewportOnBox(Bounds);
+		LastOperationText = LOCTEXT("FramedNetwork", "Viewport framed the current road selection.");
+	}
+}
+
+void URoadPaintingEditorMode::InsertPoint()
+{
+	if (ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		const FScopedTransaction Transaction(LOCTEXT("InsertRoadPoint", "Insert Road Point"));
+		Network->Modify();
+		LastOperationText = Network->InsertPointOnLink(Network->GetSelectedLinkId())
+			? LOCTEXT("InsertedRoadPoint", "Inserted and selected a road control point.")
+			: LOCTEXT("InsertRoadPointFailed", "The selected link could not be split.");
+	}
+}
+
+void URoadPaintingEditorMode::CancelInteraction()
+{
+	if (GetToolManager())
+	{
+		GetToolManager()->DeactivateTool(EToolSide::Left, EToolShutdownType::Cancel);
+		LastOperationText = LOCTEXT("CancelledInteraction", "Road editing interaction cancelled.");
+	}
+}
+
+FText URoadPaintingEditorMode::GetNetworkNameText() const
+{
+	if (ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		return FText::Format(
+			LOCTEXT("NetworkName", "Network: {0}"),
+			FText::FromString(Network->GetActorLabel()));
+	}
+	return LOCTEXT("NoNetworkName", "Network: None");
+}
+
+FText URoadPaintingEditorMode::GetNetworkSummaryText() const
+{
+	if (ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		return FText::Format(
+			LOCTEXT("NetworkSummary", "Points {0}   Links {1}   Junctions {2}"),
+			Network->GetPoints().Num(),
+			Network->GetLinks().Num(),
+			Network->GetGeneratedJunctionCount());
+	}
+	return LOCTEXT("NoNetworkSummary", "No road network has been created.");
+}
+
+FText URoadPaintingEditorMode::GetSelectionText() const
+{
+	if (ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		if (Network->GetSelectedPointId().IsValid())
+		{
+			return LOCTEXT("SelectedPoint", "Selected: control point");
+		}
+		if (Network->GetSelectedLinkId().IsValid())
+		{
+			return LOCTEXT("SelectedLink", "Selected: road link");
+		}
+	}
+	return LOCTEXT("NoSelection", "Selected: none");
+}
+
+FText URoadPaintingEditorMode::GetNetworkStatusText() const
+{
+	if (!FindRoadNetwork())
+	{
+		return LOCTEXT("ReadyWithoutNetwork", "No road network found. Draw to create one.");
+	}
+	if (ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		if (Network->HasPendingRebuild())
+		{
+			return FText::Format(
+				LOCTEXT("NetworkNeedsRebuild", "{0}  |  Rebuild pending"),
+				GetSelectionText());
+		}
+		return FText::Format(
+			LOCTEXT("NetworkReadyWithPaintStatus", "{0}  |  Ready\n{1}"),
+			GetSelectionText(),
+			Network->GetLandscapePaintStatusText());
+	}
+	return FText::Format(LOCTEXT("NetworkReady", "{0}  |  Ready"), GetSelectionText());
+}
+
+FText URoadPaintingEditorMode::GetLastOperationText() const
+{
+	return LastOperationText.IsEmpty()
+		? LOCTEXT("NoRecentOperation", "Tip: Draw a road over the landscape, then release to commit it.")
+		: LastOperationText;
+}
+
+int32 URoadPaintingEditorMode::GetNetworkPointCount() const
+{
+	if (const ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		return Network->GetPoints().Num();
+	}
+	return 0;
+}
+
+int32 URoadPaintingEditorMode::GetNetworkLinkCount() const
+{
+	if (const ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		return Network->GetLinks().Num();
+	}
+	return 0;
+}
+
+int32 URoadPaintingEditorMode::GetNetworkJunctionCount() const
+{
+	if (const ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		return Network->GetGeneratedJunctionCount();
+	}
+	return 0;
+}
+
+bool URoadPaintingEditorMode::HasNetwork() const
+{
+	return FindRoadNetwork() != nullptr;
+}
+
+bool URoadPaintingEditorMode::IsNetworkDirty() const
+{
+	if (const ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		return Network->HasPendingRebuild();
+	}
+	return false;
+}
+
+bool URoadPaintingEditorMode::HasSelection() const
+{
+	return CanDeleteSelection();
+}
+
+FText URoadPaintingEditorMode::GetSelectedElementText() const
+{
+	return GetSelectionText();
+}
+
+FText URoadPaintingEditorMode::GetValidationResultText() const
+{
+	return LastValidationText.IsEmpty()
+		? LOCTEXT("NoValidationResult", "Validation has not been run.")
+		: LastValidationText;
 }
 
 #undef LOCTEXT_NAMESPACE

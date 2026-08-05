@@ -4,9 +4,9 @@
 #include "Engine/Selection.h"
 #include "Engine/World.h"
 #include "InteractiveToolManager.h"
-#include "LandscapeProxy.h"
 #include "ProceduralRoadJunctionActor.h"
 #include "RoadNetworkActor.h"
+#include "RoadPaintingLandscapeQuery.h"
 #include "RoadPaintingEditorMode.h"
 #include "SceneManagement.h"
 #include "ScopedTransaction.h"
@@ -108,6 +108,16 @@ void URoadPaintTool::Setup()
 	UClickDragInputBehavior* MouseBehavior = NewObject<UClickDragInputBehavior>();
 	MouseBehavior->Initialize(this);
 	AddInputBehavior(MouseBehavior);
+	UMouseHoverBehavior* HoverBehavior = NewObject<UMouseHoverBehavior>();
+	HoverBehavior->Initialize(this);
+	AddInputBehavior(HoverBehavior);
+	UMouseWheelInputBehavior* WheelBehavior = NewObject<UMouseWheelInputBehavior>();
+	WheelBehavior->Initialize(this);
+	WheelBehavior->ModifierCheckFunc = [](const FInputDeviceState& InputState)
+	{
+		return FInputDeviceState::IsShiftKeyDown(InputState);
+	};
+	AddInputBehavior(WheelBehavior);
 
 	Properties = NewObject<URoadPaintToolProperties>(this);
 	if (ARoadNetworkActor* Network = FindNetwork())
@@ -131,6 +141,10 @@ void URoadPaintTool::Setup()
 				break;
 			}
 		}
+	}
+	if (!Properties->RoadClass)
+	{
+		Properties->RoadClass = AProceduralRoadActor::StaticClass();
 	}
 	if (!Properties->JunctionClass)
 	{
@@ -172,21 +186,15 @@ FInputRayHit URoadPaintTool::FindLandscapeHit(
 	{
 		return FInputRayHit();
 	}
-	TArray<FHitResult> Hits;
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(RoadPaintTool), true);
-	TargetWorld->LineTraceMultiByChannel(
-		Hits,
+	float HitDistance = 0.0f;
+	if (RoadPaintingLandscapeQuery::FindSurfaceAlongSegment(
+		TargetWorld,
 		WorldRay.Origin,
 		WorldRay.PointAt(1000000.0f),
-		ECC_Visibility,
-		QueryParams);
-	for (const FHitResult& Hit : Hits)
+		OutLocation,
+		HitDistance))
 	{
-		if (Hit.GetActor() && Hit.GetActor()->IsA<ALandscapeProxy>())
-		{
-			OutLocation = Hit.ImpactPoint;
-			return FInputRayHit(Hit.Distance);
-		}
+		return FInputRayHit(HitDistance);
 	}
 	return FInputRayHit();
 }
@@ -292,6 +300,62 @@ void URoadPaintTool::OnTerminateDragSequence()
 
 void URoadPaintTool::OnUpdateModifierState(int ModifierID, bool bIsOn)
 {
+}
+
+FInputRayHit URoadPaintTool::BeginHoverSequenceHitTest(
+	const FInputDeviceRay& PressPos)
+{
+	FVector HitLocation;
+	return Properties && Properties->RoadClass
+		? FindLandscapeHit(PressPos.WorldRay, HitLocation)
+		: FInputRayHit();
+}
+
+void URoadPaintTool::OnBeginHover(const FInputDeviceRay& DevicePos)
+{
+	OnUpdateHover(DevicePos);
+}
+
+bool URoadPaintTool::OnUpdateHover(const FInputDeviceRay& DevicePos)
+{
+	FVector HitLocation;
+	if (!FindLandscapeHit(DevicePos.WorldRay, HitLocation).bHit)
+	{
+		OnEndHover();
+		return false;
+	}
+
+	CursorLocation = HitLocation;
+	bHasCursor = true;
+	UpdateStrokePreview();
+	return true;
+}
+
+void URoadPaintTool::OnEndHover()
+{
+	bHasCursor = false;
+	bHasSnapTarget = false;
+}
+
+FInputRayHit URoadPaintTool::ShouldRespondToMouseWheel(
+	const FInputDeviceRay& CurrentPos)
+{
+	FVector HitLocation;
+	return Properties && FindLandscapeHit(CurrentPos.WorldRay, HitLocation).bHit
+		? FInputRayHit(1.0f)
+		: FInputRayHit();
+}
+
+void URoadPaintTool::OnMouseWheelScrollUp(const FInputDeviceRay& CurrentPos)
+{
+	Properties->SnapRadius = FMath::Clamp(Properties->SnapRadius + 50.0f, 10.0f, 10000.0f);
+	OnUpdateHover(CurrentPos);
+}
+
+void URoadPaintTool::OnMouseWheelScrollDown(const FInputDeviceRay& CurrentPos)
+{
+	Properties->SnapRadius = FMath::Clamp(Properties->SnapRadius - 50.0f, 10.0f, 10000.0f);
+	OnUpdateHover(CurrentPos);
 }
 
 void URoadPaintTool::Render(IToolsContextRenderAPI* RenderAPI)

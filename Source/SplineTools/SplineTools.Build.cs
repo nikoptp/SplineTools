@@ -12,6 +12,7 @@ public class SplineTools : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
+				"Landscape",
 				"ProceduralMeshComponent"
 			}
 		);

@@ -1,8 +1,15 @@
 #include "RoadNetworkActor.h"
 
+#include "RoadPaintingLandscapeQuery.h"
+#include "RoadNetworkLandscapeBrush.h"
+
 #include "Editor.h"
 #include "Engine/Selection.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
+#include "Landscape.h"
+#include "LandscapeInfo.h"
+#include "LandscapeLayerInfoObject.h"
 #include "LandscapeProxy.h"
 #include "ProceduralRoadJunctionActor.h"
 #include "ScopedTransaction.h"
@@ -106,6 +113,65 @@ bool ARoadNetworkActor::IsEditorOnly() const
 	return true;
 }
 
+void ARoadNetworkActor::Destroyed()
+{
+#if WITH_EDITOR
+	CancelQueuedUndoRebuild();
+	TArray<ARoadNetworkLandscapeBrush*> ManagedBrushes;
+	FindLoadedManagedLandscapeBrushes(ManagedBrushes);
+	for (ARoadNetworkLandscapeBrush* Brush : ManagedBrushes)
+	{
+		if (ALandscape* Landscape = Brush->GetOwningLandscape())
+		{
+			Landscape->Modify();
+			Landscape->RemoveBrush(Brush);
+		}
+		Brush->Destroy();
+	}
+#endif
+	Super::Destroyed();
+}
+
+#if WITH_EDITOR
+void ARoadNetworkActor::PostEditUndo()
+{
+	Super::PostEditUndo();
+	QueueUndoRebuild();
+}
+
+void ARoadNetworkActor::QueueUndoRebuild()
+{
+	CancelQueuedUndoRebuild();
+	UndoRebuildTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateWeakLambda(
+			this,
+			[this](float)
+			{
+				UndoRebuildTickerHandle.Reset();
+				if (!IsTemplate() && GetWorld())
+				{
+					SelectedPointId.Invalidate();
+					SelectedLinkId.Invalidate();
+					bForceFullRebuild = true;
+					RebuildGeneratedActors();
+				}
+				return false;
+			}),
+		0.0f);
+}
+
+void ARoadNetworkActor::CancelQueuedUndoRebuild()
+{
+	if (!UndoRebuildTickerHandle.IsValid())
+	{
+		return;
+	}
+
+	FTSTicker::GetCoreTicker().RemoveTicker(UndoRebuildTickerHandle);
+	UndoRebuildTickerHandle.Reset();
+}
+#endif
+
 const TArray<FRoadNetworkPoint>& ARoadNetworkActor::GetPoints() const
 {
 	return Points;
@@ -150,6 +216,82 @@ FGuid ARoadNetworkActor::GetSelectedLinkId() const
 	return SelectedLinkId;
 }
 
+int32 ARoadNetworkActor::GetGeneratedJunctionCount() const
+{
+	return GeneratedJunctions.Num();
+}
+
+bool ARoadNetworkActor::HasPendingRebuild() const
+{
+	return bForceFullRebuild
+		|| bForceJunctionRebuild
+		|| !DirtyLinkIds.IsEmpty()
+		|| !DirtyPointIds.IsEmpty();
+}
+
+bool ARoadNetworkActor::ValidateNetworkGraph(FString& OutErrors) const
+{
+	return ValidateGraph(OutErrors);
+}
+
+FText ARoadNetworkActor::GetLandscapePaintStatusText() const
+{
+	return LandscapePaintStatus.IsEmpty()
+		? NSLOCTEXT("RoadPainting", "LandscapePaintNotRun", "Landscape paint has not been rebuilt.")
+		: FText::FromString(LandscapePaintStatus);
+}
+
+bool ARoadNetworkActor::InsertPointOnLink(const FGuid& LinkId)
+{
+	const FRoadNetworkLink* Link = FindLink(LinkId);
+	if (!Link)
+	{
+		return false;
+	}
+
+	TArray<FVector> LinkSamples;
+	GetLinkWorldSamples(*Link, LinkSamples);
+	if (LinkSamples.Num() < 2)
+	{
+		return false;
+	}
+
+	const FVector Midpoint = LinkSamples[LinkSamples.Num() / 2];
+	float BestDistanceSquared = MAX_FLT;
+	float BestAlpha = 0.5f;
+	FVector BestLocation = Midpoint;
+	for (int32 SampleIndex = 0; SampleIndex + 1 < LinkSamples.Num(); ++SampleIndex)
+	{
+		float SegmentAlpha = 0.0f;
+		const float DistanceSquared = DistanceSquaredToSegment2D(
+			Midpoint,
+			LinkSamples[SampleIndex],
+			LinkSamples[SampleIndex + 1],
+			SegmentAlpha);
+		if (DistanceSquared < BestDistanceSquared)
+		{
+			BestDistanceSquared = DistanceSquared;
+			BestLocation = FMath::Lerp(
+				LinkSamples[SampleIndex],
+				LinkSamples[SampleIndex + 1],
+				SegmentAlpha);
+			BestAlpha = (SampleIndex + SegmentAlpha)
+				/ static_cast<float>(LinkSamples.Num() - 1);
+		}
+	}
+
+	Modify();
+	FGuid PointId;
+	if (!SplitLinkAtLocation(LinkId, BestLocation, PointId, BestAlpha))
+	{
+		return false;
+	}
+	SetSelection(PointId, FGuid());
+	bForceFullRebuild = true;
+	RebuildGeneratedActors();
+	return true;
+}
+
 bool ARoadNetworkActor::ProjectToLandscape(
 	const FVector& DesiredLocation,
 	FVector& OutLocation) const
@@ -159,26 +301,14 @@ bool ARoadNetworkActor::ProjectToLandscape(
 		return false;
 	}
 
-	TArray<FHitResult> Hits;
-	FCollisionQueryParams QueryParams(
-		SCENE_QUERY_STAT(RoadPaintingLandscape),
-		true,
-		this);
-	GetWorld()->LineTraceMultiByChannel(
-		Hits,
+	float HitDistance = 0.0f;
+	return RoadPaintingLandscapeQuery::FindSurfaceAlongSegment(
+		GetWorld(),
 		DesiredLocation + FVector::UpVector * 100000.0f,
 		DesiredLocation - FVector::UpVector * 100000.0f,
-		ECC_Visibility,
-		QueryParams);
-	for (const FHitResult& Hit : Hits)
-	{
-		if (Hit.GetActor() && Hit.GetActor()->IsA<ALandscapeProxy>())
-		{
-			OutLocation = Hit.ImpactPoint;
-			return true;
-		}
-	}
-	return false;
+		OutLocation,
+		HitDistance,
+		this);
 }
 
 void ARoadNetworkActor::SimplifyRange(
@@ -1016,6 +1146,59 @@ AProceduralRoadJunctionActor* ARoadNetworkActor::FindReusableJunction(
 		: nullptr;
 }
 
+void ARoadNetworkActor::FindLoadedManagedActors(
+	TArray<AProceduralRoadActor*>& OutRoadActors,
+	TArray<AProceduralRoadJunctionActor*>& OutJunctionActors) const
+{
+	OutRoadActors.Reset();
+	OutJunctionActors.Reset();
+	if (!GetWorld() || !NetworkId.IsValid())
+	{
+		return;
+	}
+
+	for (TActorIterator<AProceduralRoadActor> Iterator(GetWorld()); Iterator; ++Iterator)
+	{
+		if (Iterator->IsManagedByRoadNetwork(NetworkId))
+		{
+			OutRoadActors.Add(*Iterator);
+		}
+	}
+	for (TActorIterator<AProceduralRoadJunctionActor> Iterator(GetWorld()); Iterator; ++Iterator)
+	{
+		if (Iterator->IsManagedByRoadNetwork(NetworkId))
+		{
+			OutJunctionActors.Add(*Iterator);
+		}
+	}
+}
+
+void ARoadNetworkActor::FindLoadedManagedLandscapeBrushes(
+	TArray<ARoadNetworkLandscapeBrush*>& OutBrushes) const
+{
+	OutBrushes.Reset();
+	if (!GetWorld() || !NetworkId.IsValid())
+	{
+		return;
+	}
+
+	for (TActorIterator<ARoadNetworkLandscapeBrush> Iterator(GetWorld()); Iterator; ++Iterator)
+	{
+		if (Iterator->IsManagedBy(NetworkId))
+		{
+			OutBrushes.Add(*Iterator);
+		}
+	}
+	for (const FRoadGeneratedLandscapeBrush& GeneratedBrush : GeneratedLandscapeBrushes)
+	{
+		ARoadNetworkLandscapeBrush* Brush = GeneratedBrush.BrushActor.LoadSynchronous();
+		if (Brush && Brush->IsManagedBy(NetworkId))
+		{
+			OutBrushes.AddUnique(Brush);
+		}
+	}
+}
+
 void ARoadNetworkActor::RebuildGeneratedActors()
 {
 	if (!GetWorld() || !NetworkId.IsValid())
@@ -1024,6 +1207,8 @@ void ARoadNetworkActor::RebuildGeneratedActors()
 	}
 
 	TArray<AProceduralRoadActor*> ExistingRoadActors;
+	TArray<AProceduralRoadJunctionActor*> ExistingJunctionActors;
+	FindLoadedManagedActors(ExistingRoadActors, ExistingJunctionActors);
 	for (const FRoadGeneratedRun& ExistingRun : GeneratedRuns)
 	{
 		if (AProceduralRoadActor* Road = ExistingRun.RoadActor.LoadSynchronous())
@@ -1272,9 +1457,14 @@ void ARoadNetworkActor::RebuildGeneratedActors()
 	for (const FRoadGeneratedJunction& ExistingJunction : GeneratedJunctions)
 	{
 		AProceduralRoadJunctionActor* Junction = ExistingJunction.JunctionActor.LoadSynchronous();
-		if (Junction
-			&& Junction->IsManagedByRoadNetwork(NetworkId)
-			&& !UsedJunctionActors.Contains(Junction))
+		if (Junction && Junction->IsManagedByRoadNetwork(NetworkId))
+		{
+			ExistingJunctionActors.AddUnique(Junction);
+		}
+	}
+	for (AProceduralRoadJunctionActor* Junction : ExistingJunctionActors)
+	{
+		if (Junction && !UsedJunctionActors.Contains(Junction))
 		{
 			DirtyJunctionNeighborhoods.Add(TPair<FVector, float>(
 				Junction->GetActorLocation(),
@@ -1326,6 +1516,7 @@ void ARoadNetworkActor::RebuildGeneratedActors()
 	{
 		Junction->RebuildJunctionMesh();
 	}
+	RebuildLandscapeMaterialPaint();
 	GeneratedRuns = MoveTemp(NewGeneratedRuns);
 	GeneratedJunctions = MoveTemp(NewGeneratedJunctions);
 	DirtyLinkIds.Reset();
@@ -1333,6 +1524,258 @@ void ARoadNetworkActor::RebuildGeneratedActors()
 	bForceFullRebuild = false;
 	bForceJunctionRebuild = false;
 	MarkPackageDirty();
+}
+
+bool ARoadNetworkActor::RebuildLandscapeMaterialPaint()
+{
+	struct FBrushEditLayerGroup
+	{
+		FName EditLayerName;
+		TArray<FRoadLandscapeBrushLayer> PaintLayers;
+	};
+
+	if (!GetWorld())
+	{
+		LandscapePaintStatus = TEXT("Landscape paint skipped: the network has no world.");
+		return false;
+	}
+
+	TArray<FBrushEditLayerGroup> BrushGroups;
+	TArray<FString> BrushMessages;
+	TSet<UClass*> NarrowPaintProfileWarnings;
+	int32 PaintedLinkCount = 0;
+	for (const FRoadNetworkLink& Link : Links)
+	{
+		UClass* RoadClass = Link.RoadClass.LoadSynchronous();
+		AProceduralRoadActor* RoadDefaults = RoadClass
+			? RoadClass->GetDefaultObject<AProceduralRoadActor>()
+			: nullptr;
+		if (!RoadDefaults)
+		{
+			continue;
+		}
+
+		const FProceduralRoadLandscapePaintSettings& Settings =
+			RoadDefaults->GetLandscapePaintSettings();
+		if (!Settings.bEnabled)
+		{
+			continue;
+		}
+
+		ULandscapeLayerInfoObject* LayerInfo = Settings.LayerInfo.LoadSynchronous();
+		if (!LayerInfo || Settings.EditLayerName.IsNone()
+			|| Settings.PaintWidth <= 0.0f || Settings.PaintFalloff < 0.0f)
+		{
+			BrushMessages.Add(FString::Printf(
+				TEXT("Road class '%s' has incomplete Landscape Paint defaults."),
+				*GetNameSafe(RoadClass)));
+			continue;
+		}
+		if (Settings.PaintWidth + Settings.PaintFalloff * 2.0f
+			<= RoadDefaults->GetRoadWidth()
+			&& !NarrowPaintProfileWarnings.Contains(RoadClass))
+		{
+			BrushMessages.Add(FString::Printf(
+				TEXT("Road class '%s' has a %.0f cm total paint mask across a %.0f cm road; increase Paint Width or Falloff to expose a painted shoulder."),
+				*GetNameSafe(RoadClass),
+				Settings.PaintWidth + Settings.PaintFalloff * 2.0f,
+				RoadDefaults->GetRoadWidth()));
+			NarrowPaintProfileWarnings.Add(RoadClass);
+		}
+
+		FBrushEditLayerGroup* BrushGroup = BrushGroups.FindByPredicate(
+			[&Settings](const FBrushEditLayerGroup& Candidate)
+			{
+				return Candidate.EditLayerName == Settings.EditLayerName;
+			});
+		if (!BrushGroup)
+		{
+			BrushGroup = &BrushGroups.AddDefaulted_GetRef();
+			BrushGroup->EditLayerName = Settings.EditLayerName;
+		}
+
+		FRoadLandscapeBrushLayer* PaintLayer = BrushGroup->PaintLayers.FindByPredicate(
+			[LayerInfo](const FRoadLandscapeBrushLayer& Candidate)
+			{
+				return Candidate.WeightmapLayerName == LayerInfo->LayerName;
+			});
+		if (!PaintLayer)
+		{
+			PaintLayer = &BrushGroup->PaintLayers.AddDefaulted_GetRef();
+			PaintLayer->WeightmapLayerName = LayerInfo->LayerName;
+		}
+
+		TArray<FVector> LinkSamples;
+		SampleLinkPath(Link, LinkSamples);
+		if (LinkSamples.Num() < 2)
+		{
+			continue;
+		}
+		for (int32 SampleIndex = 0; SampleIndex + 1 < LinkSamples.Num(); ++SampleIndex)
+		{
+			FRoadLandscapeBrushSegment& Segment = PaintLayer->Segments.AddDefaulted_GetRef();
+			Segment.WorldStart = LinkSamples[SampleIndex];
+			Segment.WorldEnd = LinkSamples[SampleIndex + 1];
+			Segment.CoreHalfWidth = Settings.PaintWidth * 0.5f;
+			Segment.Falloff = Settings.PaintFalloff;
+		}
+		++PaintedLinkCount;
+	}
+
+	TArray<ARoadNetworkLandscapeBrush*> ExistingBrushes;
+	FindLoadedManagedLandscapeBrushes(ExistingBrushes);
+	TSet<ARoadNetworkLandscapeBrush*> UsedBrushes;
+	TArray<FRoadGeneratedLandscapeBrush> NewGeneratedBrushes;
+	TSet<ALandscape*> Landscapes;
+	for (TActorIterator<ALandscapeProxy> Iterator(GetWorld()); Iterator; ++Iterator)
+	{
+		if (ALandscape* Landscape = Iterator->GetLandscapeActor())
+		{
+			Landscapes.Add(Landscape);
+		}
+	}
+
+	for (ALandscape* Landscape : Landscapes)
+	{
+		if (!Landscape->HasLayersContent())
+		{
+			BrushMessages.Add(FString::Printf(
+				TEXT("Landscape '%s' does not have Edit Layers enabled."),
+				*Landscape->GetActorLabel()));
+			continue;
+		}
+
+		ULandscapeInfo* LandscapeInfo = Landscape->GetLandscapeInfo();
+		if (!LandscapeInfo)
+		{
+			continue;
+		}
+		const TArray<FName> MaterialLayers = Landscape->GetLayersFromMaterial();
+		for (const FBrushEditLayerGroup& BrushGroup : BrushGroups)
+		{
+			TArray<FRoadLandscapeBrushLayer> ValidPaintLayers;
+			for (const FRoadLandscapeBrushLayer& PaintLayer : BrushGroup.PaintLayers)
+			{
+				if (!MaterialLayers.Contains(PaintLayer.WeightmapLayerName))
+				{
+					BrushMessages.Add(FString::Printf(
+						TEXT("Landscape material '%s' does not expose layer '%s'."),
+						*GetNameSafe(Landscape->GetLandscapeMaterial()),
+						*PaintLayer.WeightmapLayerName.ToString()));
+					continue;
+				}
+				if (!LandscapeInfo->GetLayerInfoByName(PaintLayer.WeightmapLayerName))
+				{
+					BrushMessages.Add(FString::Printf(
+						TEXT("Layer '%s' has no Layer Info assignment on Landscape '%s'."),
+						*PaintLayer.WeightmapLayerName.ToString(),
+						*Landscape->GetActorLabel()));
+					continue;
+				}
+				ValidPaintLayers.Add(PaintLayer);
+			}
+			if (ValidPaintLayers.IsEmpty())
+			{
+				continue;
+			}
+
+			int32 EditLayerIndex = Landscape->GetLayerIndex(BrushGroup.EditLayerName);
+			if (EditLayerIndex == INDEX_NONE && Landscape->CanHaveLayersContent())
+			{
+				Landscape->Modify();
+				Landscape->CreateLayer(BrushGroup.EditLayerName);
+				EditLayerIndex = Landscape->GetLayerIndex(BrushGroup.EditLayerName);
+			}
+			if (EditLayerIndex == INDEX_NONE)
+			{
+				BrushMessages.Add(FString::Printf(
+					TEXT("Landscape edit layer '%s' could not be created."),
+					*BrushGroup.EditLayerName.ToString()));
+				continue;
+			}
+
+			ARoadNetworkLandscapeBrush* Brush = nullptr;
+			for (ARoadNetworkLandscapeBrush* ExistingBrush : ExistingBrushes)
+			{
+				if (ExistingBrush->GetOwningLandscape() == Landscape
+					&& ExistingBrush->GetManagedEditLayerName() == BrushGroup.EditLayerName)
+				{
+					Brush = ExistingBrush;
+					break;
+				}
+			}
+			if (!Brush)
+			{
+				FActorSpawnParameters SpawnParameters;
+				SpawnParameters.ObjectFlags |= RF_Transactional;
+				SpawnParameters.SpawnCollisionHandlingOverride =
+					ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+				Brush = GetWorld()->SpawnActor<ARoadNetworkLandscapeBrush>(
+					ARoadNetworkLandscapeBrush::StaticClass(),
+					FTransform::Identity,
+					SpawnParameters);
+				if (!Brush)
+				{
+					BrushMessages.Add(TEXT("Failed to create a managed road Landscape brush."));
+					continue;
+				}
+				Brush->SetActorLabel(FString::Printf(
+					TEXT("Road Landscape Brush - %s"),
+					*BrushGroup.EditLayerName.ToString()));
+			}
+
+			Landscape->Modify();
+			const int32 CurrentBrushLayerIndex = Landscape->GetBrushLayer(Brush);
+			if (CurrentBrushLayerIndex != EditLayerIndex)
+			{
+				if (CurrentBrushLayerIndex != INDEX_NONE)
+				{
+					Landscape->RemoveBrush(Brush);
+				}
+				Landscape->AddBrushToLayer(EditLayerIndex, Brush);
+			}
+			Brush->Configure(this, NetworkId, BrushGroup.EditLayerName, ValidPaintLayers);
+			Brush->RequestLandscapeUpdate(true);
+			UsedBrushes.Add(Brush);
+
+			FRoadGeneratedLandscapeBrush& GeneratedBrush =
+				NewGeneratedBrushes.AddDefaulted_GetRef();
+			GeneratedBrush.Landscape = Landscape;
+			GeneratedBrush.EditLayerName = BrushGroup.EditLayerName;
+			GeneratedBrush.BrushActor = Brush;
+		}
+	}
+
+	for (ARoadNetworkLandscapeBrush* ExistingBrush : ExistingBrushes)
+	{
+		if (!ExistingBrush || UsedBrushes.Contains(ExistingBrush))
+		{
+			continue;
+		}
+		if (ALandscape* Landscape = ExistingBrush->GetOwningLandscape())
+		{
+			Landscape->Modify();
+			Landscape->RemoveBrush(ExistingBrush);
+		}
+		ExistingBrush->Destroy();
+	}
+
+	GeneratedLandscapeBrushes = MoveTemp(NewGeneratedBrushes);
+	if (!GeneratedLandscapeBrushes.IsEmpty())
+	{
+		BrushMessages.Insert(FString::Printf(
+			TEXT("Landscape paint synchronized from %d road links through %d bounded edit-layer brushes."),
+			PaintedLinkCount,
+			GeneratedLandscapeBrushes.Num()), 0);
+	}
+	else if (BrushGroups.IsEmpty())
+	{
+		BrushMessages.Insert(TEXT("Landscape paint disabled in the road Blueprint defaults; managed brushes removed."), 0);
+	}
+	LandscapePaintStatus = FString::Join(BrushMessages, TEXT(" "));
+	MarkPackageDirty();
+	return !GeneratedLandscapeBrushes.IsEmpty() || BrushGroups.IsEmpty();
+
 }
 
 void ARoadNetworkActor::RemoveIsolatedPoints()
@@ -1627,6 +2070,45 @@ bool ARoadNetworkActor::ValidateGraph(FString& OutErrors) const
 		}
 		LinkIds.Add(Link.Id);
 	}
+	TSet<UClass*> ValidatedRoadClasses;
+	for (const FRoadNetworkLink& Link : Links)
+	{
+		UClass* RoadClass = Link.RoadClass.LoadSynchronous();
+		if (!RoadClass || ValidatedRoadClasses.Contains(RoadClass))
+		{
+			continue;
+		}
+		ValidatedRoadClasses.Add(RoadClass);
+		AProceduralRoadActor* RoadDefaults = RoadClass->GetDefaultObject<AProceduralRoadActor>();
+		if (!RoadDefaults)
+		{
+			continue;
+		}
+
+		FProceduralRoadLandscapePaintSettings Settings = RoadDefaults->GetLandscapePaintSettings();
+		if (!Settings.bEnabled)
+		{
+			continue;
+		}
+		if (Settings.LayerInfo.IsNull())
+		{
+			OutErrors += FString::Printf(
+				TEXT("Road class '%s' enables Landscape painting without a Landscape Layer Info asset.\n"),
+				*GetNameSafe(RoadClass));
+		}
+		if (Settings.EditLayerName.IsNone())
+		{
+			OutErrors += FString::Printf(
+				TEXT("Road class '%s' has no Landscape edit-layer name.\n"),
+				*GetNameSafe(RoadClass));
+		}
+		if (Settings.PaintWidth <= 0.0f || Settings.PaintFalloff < 0.0f)
+		{
+			OutErrors += FString::Printf(
+				TEXT("Road class '%s' has invalid Landscape paint width or falloff defaults.\n"),
+				*GetNameSafe(RoadClass));
+		}
+	}
 	TSet<FGuid> RunIds;
 	for (const FRoadGeneratedRun& Run : GeneratedRuns)
 	{
@@ -1698,7 +2180,7 @@ void ARoadNetworkActor::AdoptSelected()
 void ARoadNetworkActor::ValidateNetwork()
 {
 	FString Errors;
-	if (ValidateGraph(Errors))
+	if (ValidateNetworkGraph(Errors))
 	{
 		UE_LOG(LogRoadPainting, Display, TEXT("Road network %s is valid."), *GetActorLabel());
 	}

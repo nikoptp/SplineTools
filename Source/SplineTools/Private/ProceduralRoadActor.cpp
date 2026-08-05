@@ -195,6 +195,16 @@ UMaterialInterface* AProceduralRoadActor::GetRoadSideFlapMaterial() const
 	return SideFlapMaterial ? SideFlapMaterial.Get() : RoadMaterial.Get();
 }
 
+float AProceduralRoadActor::GetRoadWidth() const
+{
+	return RoadWidth;
+}
+
+const FProceduralRoadLandscapePaintSettings& AProceduralRoadActor::GetLandscapePaintSettings() const
+{
+	return LandscapePaintSettings;
+}
+
 bool AProceduralRoadActor::SetJunctionTrim(
 	ERoadSplineEndpoint Endpoint,
 	float TrimDistance,

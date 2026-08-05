@@ -6,6 +6,9 @@
 #include "RoadNetworkActor.generated.h"
 
 class AProceduralRoadJunctionActor;
+class ALandscape;
+class ARoadNetworkLandscapeBrush;
+class ULandscapeLayerInfoObject;
 
 USTRUCT()
 struct SPLINETOOLSEDITOR_API FRoadNetworkPoint
@@ -82,6 +85,21 @@ struct SPLINETOOLSEDITOR_API FRoadGeneratedJunction
 	TSoftObjectPtr<AProceduralRoadJunctionActor> JunctionActor;
 };
 
+USTRUCT()
+struct SPLINETOOLSEDITOR_API FRoadGeneratedLandscapeBrush
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TSoftObjectPtr<ALandscape> Landscape;
+
+	UPROPERTY()
+	FName EditLayerName;
+
+	UPROPERTY()
+	TSoftObjectPtr<ARoadNetworkLandscapeBrush> BrushActor;
+};
+
 UCLASS(NotBlueprintable)
 class SPLINETOOLSEDITOR_API ARoadNetworkActor : public AActor
 {
@@ -91,10 +109,16 @@ public:
 	ARoadNetworkActor();
 
 	virtual bool IsEditorOnly() const override;
+	virtual void Destroyed() override;
+
+#if WITH_EDITOR
+	virtual void PostEditUndo() override;
+#endif
 
 	bool AddPaintedStroke(
 		const TArray<FVector>& SampledPoints,
 		TSubclassOf<AProceduralRoadActor> RoadClass);
+	bool InsertPointOnLink(const FGuid& LinkId);
 	bool MovePointToLandscape(const FGuid& PointId, const FVector& WorldLocation);
 	bool DeletePoint(const FGuid& PointId);
 	bool DeleteLink(const FGuid& LinkId);
@@ -117,6 +141,10 @@ public:
 	FGuid GetSelectedLinkId() const;
 	const TArray<FRoadNetworkPoint>& GetPoints() const;
 	const TArray<FRoadNetworkLink>& GetLinks() const;
+	int32 GetGeneratedJunctionCount() const;
+	bool HasPendingRebuild() const;
+	bool ValidateNetworkGraph(FString& OutErrors) const;
+	FText GetLandscapePaintStatusText() const;
 	const FRoadNetworkPoint* FindPoint(const FGuid& PointId) const;
 	const FRoadNetworkLink* FindLink(const FGuid& LinkId) const;
 
@@ -192,12 +220,23 @@ private:
 	void BuildAdjacency(TMap<FGuid, TArray<int32>>& OutAdjacency) const;
 	void BuildRunCandidates(TArray<FGeneratedRunCandidate>& OutRuns) const;
 	void RebuildGeneratedActors();
+	bool RebuildLandscapeMaterialPaint();
+	void FindLoadedManagedActors(
+		TArray<AProceduralRoadActor*>& OutRoadActors,
+		TArray<AProceduralRoadJunctionActor*>& OutJunctionActors) const;
+	void FindLoadedManagedLandscapeBrushes(
+		TArray<ARoadNetworkLandscapeBrush*>& OutBrushes) const;
 	AProceduralRoadActor* FindReusableRoad(
 		const FGeneratedRunCandidate& Run,
 		TSet<FGuid>& UsedRunIds,
 		FGuid& OutRunId) const;
 	AProceduralRoadJunctionActor* FindReusableJunction(const FGuid& NodeId) const;
 	bool ValidateGraph(FString& OutErrors) const;
+
+#if WITH_EDITOR
+	void QueueUndoRebuild();
+	void CancelQueuedUndoRebuild();
+#endif
 
 	UPROPERTY()
 	FGuid NetworkId;
@@ -213,6 +252,25 @@ private:
 
 	UPROPERTY()
 	TArray<FRoadGeneratedJunction> GeneratedJunctions;
+
+	UPROPERTY()
+	TArray<FRoadGeneratedLandscapeBrush> GeneratedLandscapeBrushes;
+
+	/** Hidden migration data from the original network-owned Landscape paint settings. */
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Configure Landscape paint in the road Blueprint Class Defaults."))
+	bool bPaintLandscapeMaterial = false;
+
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Configure Landscape paint in the road Blueprint Class Defaults."))
+	TSoftObjectPtr<ULandscapeLayerInfoObject> LandscapePaintLayer;
+
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Configure Landscape paint in the road Blueprint Class Defaults."))
+	FName LandscapePaintEditLayer = TEXT("RoadPainting");
+
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Configure Landscape paint in the road Blueprint Class Defaults."))
+	float LandscapePaintWidth = 500.0f;
+
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Configure Landscape paint in the road Blueprint Class Defaults."))
+	float LandscapePaintFalloff = 300.0f;
 
 	UPROPERTY(Transient)
 	FGuid SelectedPointId;
@@ -231,4 +289,10 @@ private:
 
 	UPROPERTY(Transient)
 	bool bForceJunctionRebuild = false;
+
+	FString LandscapePaintStatus;
+
+#if WITH_EDITOR
+	FTSTicker::FDelegateHandle UndoRebuildTickerHandle;
+#endif
 };

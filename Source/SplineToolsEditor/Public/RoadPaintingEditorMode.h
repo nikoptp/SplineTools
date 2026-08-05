@@ -24,10 +24,37 @@ public:
 	ARoadNetworkActor* FindRoadNetwork() const;
 	ARoadNetworkActor* GetOrCreateRoadNetwork();
 
-private:
 	void DeleteSelection();
 	void AdoptSelectedRoads();
 	void RebuildDirty();
 	void RebuildAll();
 	void ValidateNetwork();
+	void FrameNetwork();
+	void InsertPoint();
+	void CancelInteraction();
+
+	bool CanDeleteSelection() const;
+	bool CanAdoptSelectedRoads() const;
+	bool CanRebuild() const;
+	bool CanFrameNetwork() const;
+	bool CanInsertPoint() const;
+
+	FText GetNetworkNameText() const;
+	FText GetNetworkSummaryText() const;
+	FText GetNetworkStatusText() const;
+	FText GetLastOperationText() const;
+	int32 GetNetworkPointCount() const;
+	int32 GetNetworkLinkCount() const;
+	int32 GetNetworkJunctionCount() const;
+	bool HasNetwork() const;
+	bool IsNetworkDirty() const;
+	bool HasSelection() const;
+	FText GetSelectedElementText() const;
+	FText GetValidationResultText() const;
+
+private:
+	FText GetSelectionText() const;
+
+	FText LastOperationText;
+	FText LastValidationText;
 };

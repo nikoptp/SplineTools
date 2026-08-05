@@ -6,6 +6,7 @@
 #include "ProceduralRoadActor.generated.h"
 
 class UDecalComponent;
+class ULandscapeLayerInfoObject;
 class UMaterialInterface;
 class UProceduralMeshComponent;
 struct FSplineRoadCrossSection;
@@ -66,6 +67,30 @@ struct SPLINETOOLS_API FProceduralRoadJunctionEdgeGeometry
 	bool bUsesCachedMesh = false;
 };
 
+/** Editor-authored Landscape material paint generated for this road class. */
+USTRUCT(BlueprintType)
+struct SPLINETOOLS_API FProceduralRoadLandscapePaintSettings
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Landscape Paint")
+	bool bEnabled = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Landscape Paint", meta = (EditCondition = "bEnabled"))
+	TSoftObjectPtr<ULandscapeLayerInfoObject> LayerInfo;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Landscape Paint", meta = (EditCondition = "bEnabled"))
+	FName EditLayerName = TEXT("RoadPainting");
+
+	/** Total fully-painted width in world units before falloff begins. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Landscape Paint", meta = (EditCondition = "bEnabled", ClampMin = "1.0"))
+	float PaintWidth = 1000.0f;
+
+	/** Additional fade distance on each side in world units. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Landscape Paint", meta = (EditCondition = "bEnabled", ClampMin = "0.0"))
+	float PaintFalloff = 300.0f;
+};
+
 UCLASS(BlueprintType)
 class SPLINETOOLS_API AProceduralRoadActor : public ASplineToolActorBase
 {
@@ -88,6 +113,11 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Road|Material")
 	UMaterialInterface* GetRoadSideFlapMaterial() const;
+
+	UFUNCTION(BlueprintPure, Category = "Road")
+	float GetRoadWidth() const;
+
+	const FProceduralRoadLandscapePaintSettings& GetLandscapePaintSettings() const;
 
 	bool SetJunctionTrim(
 		ERoadSplineEndpoint Endpoint,
@@ -215,6 +245,9 @@ private:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Material", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UMaterialInterface> SideFlapMaterial;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Road|Landscape Paint", meta = (AllowPrivateAccess = "true", ShowOnlyInnerProperties))
+	FProceduralRoadLandscapePaintSettings LandscapePaintSettings;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Material", meta = (ClampMin = "1.0", AllowPrivateAccess = "true"))
 	FVector2D UVWorldSize = FVector2D(400.0f, 400.0f);

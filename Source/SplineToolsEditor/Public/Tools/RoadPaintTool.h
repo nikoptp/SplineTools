@@ -1,6 +1,8 @@
 #pragma once
 
 #include "BaseBehaviors/ClickDragBehavior.h"
+#include "BaseBehaviors/MouseHoverBehavior.h"
+#include "BaseBehaviors/MouseWheelBehavior.h"
 #include "InteractiveToolBuilder.h"
 #include "ProceduralRoadActor.h"
 #include "RoadPaintTool.generated.h"
@@ -48,12 +50,15 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Connections", meta = (ClampMin = "0.0"))
 	float MaximumJunctionHeightDifference = 200.0f;
+
 };
 
 UCLASS()
 class SPLINETOOLSEDITOR_API URoadPaintTool
 	: public UInteractiveTool
 	, public IClickDragBehaviorTarget
+	, public IHoverBehaviorTarget
+	, public IMouseWheelBehaviorTarget
 {
 	GENERATED_BODY()
 
@@ -69,6 +74,13 @@ public:
 	virtual void OnClickRelease(const FInputDeviceRay& ReleasePos) override;
 	virtual void OnTerminateDragSequence() override;
 	virtual void OnUpdateModifierState(int ModifierID, bool bIsOn) override;
+	virtual FInputRayHit BeginHoverSequenceHitTest(const FInputDeviceRay& PressPos) override;
+	virtual void OnBeginHover(const FInputDeviceRay& DevicePos) override;
+	virtual bool OnUpdateHover(const FInputDeviceRay& DevicePos) override;
+	virtual void OnEndHover() override;
+	virtual FInputRayHit ShouldRespondToMouseWheel(const FInputDeviceRay& CurrentPos) override;
+	virtual void OnMouseWheelScrollUp(const FInputDeviceRay& CurrentPos) override;
+	virtual void OnMouseWheelScrollDown(const FInputDeviceRay& CurrentPos) override;
 
 private:
 	FInputRayHit FindLandscapeHit(const FRay& WorldRay, FVector& OutLocation) const;

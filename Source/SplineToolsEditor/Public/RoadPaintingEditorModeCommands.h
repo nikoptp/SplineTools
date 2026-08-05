@@ -17,6 +17,9 @@ public:
 	TSharedPtr<FUICommandInfo> RebuildDirty;
 	TSharedPtr<FUICommandInfo> RebuildAll;
 	TSharedPtr<FUICommandInfo> Validate;
+	TSharedPtr<FUICommandInfo> FrameNetwork;
+	TSharedPtr<FUICommandInfo> InsertPoint;
+	TSharedPtr<FUICommandInfo> CancelInteraction;
 
 private:
 	TMap<FName, TArray<TSharedPtr<FUICommandInfo>>> Commands;
