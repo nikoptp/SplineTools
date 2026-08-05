@@ -100,6 +100,42 @@ struct SPLINETOOLSEDITOR_API FRoadGeneratedLandscapeBrush
 	TSoftObjectPtr<ARoadNetworkLandscapeBrush> BrushActor;
 };
 
+struct SPLINETOOLSEDITOR_API FRoadStrokePreviewState
+{
+	void Reset()
+	{
+		InputPoints.Reset();
+		SimplifiedPoints.Reset();
+		IntersectionPoints.Reset();
+		CachedLinkSamples.Reset();
+		CachedLinkSampleFlags.Reset();
+		StrokeSegmentIndex = 0;
+		LinkIndex = 0;
+		LinkSampleIndex = 0;
+		FirstSegmentIndex = 0;
+		SecondSegmentIndex = 2;
+		CurrentLinkIndex = INDEX_NONE;
+		bTestingSelfIntersections = false;
+		bInitialized = false;
+		bComplete = false;
+	}
+
+	TArray<FVector> InputPoints;
+	TArray<FVector> SimplifiedPoints;
+	TArray<FVector> IntersectionPoints;
+	TArray<TArray<FVector>> CachedLinkSamples;
+	TArray<bool> CachedLinkSampleFlags;
+	int32 StrokeSegmentIndex = 0;
+	int32 LinkIndex = 0;
+	int32 LinkSampleIndex = 0;
+	int32 FirstSegmentIndex = 0;
+	int32 SecondSegmentIndex = 2;
+	int32 CurrentLinkIndex = INDEX_NONE;
+	bool bTestingSelfIntersections = false;
+	bool bInitialized = false;
+	bool bComplete = false;
+};
+
 UCLASS(NotBlueprintable)
 class SPLINETOOLSEDITOR_API ARoadNetworkActor : public AActor
 {
@@ -125,8 +161,10 @@ public:
 	bool DeleteSelection();
 	bool AdoptSelectedRoads();
 	bool ProjectToLandscape(const FVector& DesiredLocation, FVector& OutLocation) const;
-	void BuildStrokePreview(
+	void RequestLandscapePaintUpdate();
+	bool BuildStrokePreview(
 		const TArray<FVector>& SampledPoints,
+		FRoadStrokePreviewState& PreviewState,
 		TArray<FVector>& OutSimplifiedPoints,
 		TArray<FVector>& OutIntersectionPoints) const;
 	bool FindSnapPreviewTarget(
@@ -190,6 +228,7 @@ public:
 private:
 	struct FGeneratedRunCandidate;
 	struct FStrokeIntersection;
+	struct FLandscapePaintRebuildState;
 
 	void SimplifyStroke(
 		const TArray<FVector>& InputPoints,
@@ -221,6 +260,11 @@ private:
 	void BuildRunCandidates(TArray<FGeneratedRunCandidate>& OutRuns) const;
 	void RebuildGeneratedActors();
 	bool RebuildLandscapeMaterialPaint();
+	bool ContinueLandscapeMaterialPaintRebuild();
+	void CancelLandscapeMaterialPaintRebuild();
+	void ScheduleLandscapeMaterialPaintRebuild();
+	void CancelLandscapePaintUpdate();
+	void ScheduleLandscapePaintUpdate();
 	void FindLoadedManagedActors(
 		TArray<AProceduralRoadActor*>& OutRoadActors,
 		TArray<AProceduralRoadJunctionActor*>& OutJunctionActors) const;
@@ -291,6 +335,11 @@ private:
 	bool bForceJunctionRebuild = false;
 
 	FString LandscapePaintStatus;
+
+	TSharedPtr<FLandscapePaintRebuildState> LandscapePaintRebuildState;
+	bool bLandscapePaintRebuildPending = false;
+	FTSTicker::FDelegateHandle LandscapePaintRebuildTickerHandle;
+	FTSTicker::FDelegateHandle LandscapePaintUpdateTickerHandle;
 
 #if WITH_EDITOR
 	FTSTicker::FDelegateHandle UndoRebuildTickerHandle;

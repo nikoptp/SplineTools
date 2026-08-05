@@ -60,6 +60,7 @@ public:
 		const FGuid& InNetworkId,
 		FName InEditLayerName,
 		const TArray<FRoadLandscapeBrushLayer>& InPaintLayers);
+	void MarkTargetLayerComponentsDirty();
 	bool IsManagedBy(const FGuid& InNetworkId) const;
 	FName GetManagedEditLayerName() const;
 

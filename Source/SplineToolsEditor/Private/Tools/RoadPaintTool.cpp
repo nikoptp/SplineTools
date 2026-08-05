@@ -13,74 +13,6 @@
 
 #define LOCTEXT_NAMESPACE "RoadPaintTool"
 
-namespace
-{
-	void SimplifyPreviewRange(
-		const TArray<FVector>& Points,
-		int32 FirstIndex,
-		int32 LastIndex,
-		float ToleranceSquared,
-		TArray<bool>& KeepPoints)
-	{
-		if (LastIndex <= FirstIndex + 1)
-		{
-			return;
-		}
-		float GreatestDistanceSquared = 0.0f;
-		int32 GreatestIndex = INDEX_NONE;
-		for (int32 PointIndex = FirstIndex + 1; PointIndex < LastIndex; ++PointIndex)
-		{
-			const FVector Closest = FMath::ClosestPointOnSegment(
-				Points[PointIndex],
-				Points[FirstIndex],
-				Points[LastIndex]);
-			const float DistanceSquared = FVector::DistSquared(Points[PointIndex], Closest);
-			if (DistanceSquared > GreatestDistanceSquared)
-			{
-				GreatestDistanceSquared = DistanceSquared;
-				GreatestIndex = PointIndex;
-			}
-		}
-		if (GreatestIndex == INDEX_NONE || GreatestDistanceSquared <= ToleranceSquared)
-		{
-			return;
-		}
-		KeepPoints[GreatestIndex] = true;
-		SimplifyPreviewRange(Points, FirstIndex, GreatestIndex, ToleranceSquared, KeepPoints);
-		SimplifyPreviewRange(Points, GreatestIndex, LastIndex, ToleranceSquared, KeepPoints);
-	}
-
-	void SimplifyPreviewStroke(
-		const TArray<FVector>& Points,
-		float Tolerance,
-		TArray<FVector>& OutPoints)
-	{
-		OutPoints.Reset();
-		if (Points.Num() < 2)
-		{
-			OutPoints = Points;
-			return;
-		}
-		TArray<bool> KeepPoints;
-		KeepPoints.Init(false, Points.Num());
-		KeepPoints[0] = true;
-		KeepPoints.Last() = true;
-		SimplifyPreviewRange(
-			Points,
-			0,
-			Points.Num() - 1,
-			FMath::Square(Tolerance),
-			KeepPoints);
-		for (int32 PointIndex = 0; PointIndex < Points.Num(); ++PointIndex)
-		{
-			if (KeepPoints[PointIndex])
-			{
-				OutPoints.Add(Points[PointIndex]);
-			}
-		}
-	}
-}
-
 bool URoadPaintToolBuilder::CanBuildTool(const FToolBuilderState& SceneState) const
 {
 	return SceneState.World != nullptr;
@@ -158,7 +90,32 @@ void URoadPaintTool::Shutdown(EToolShutdownType ShutdownType)
 	StrokePoints.Reset();
 	SimplifiedStrokePoints.Reset();
 	PreviewIntersections.Reset();
+	StrokePreviewState.Reset();
+	bStrokePreviewPending = false;
 	UInteractiveTool::Shutdown(ShutdownType);
+}
+
+void URoadPaintTool::OnTick(float)
+{
+	if (!bStrokePreviewPending)
+	{
+		return;
+	}
+
+	ARoadNetworkActor* Network = FindNetwork();
+	if (!Network)
+	{
+		StrokePreviewState.Reset();
+		PreviewIntersections.Reset();
+		bStrokePreviewPending = false;
+		return;
+	}
+
+	bStrokePreviewPending = !Network->BuildStrokePreview(
+		StrokePoints,
+		StrokePreviewState,
+		SimplifiedStrokePoints,
+		PreviewIntersections);
 }
 
 ARoadNetworkActor* URoadPaintTool::FindNetwork() const
@@ -227,23 +184,24 @@ void URoadPaintTool::AddStrokeSample(const FVector& WorldLocation, bool bForce)
 
 void URoadPaintTool::UpdateStrokePreview()
 {
-	SimplifyPreviewStroke(
-		StrokePoints,
-		Properties->SimplificationTolerance,
-		SimplifiedStrokePoints);
-	PreviewIntersections.Reset();
-	bHasSnapTarget = false;
-	if (ARoadNetworkActor* Network = FindNetwork())
+	if (StrokePreviewState.InputPoints != StrokePoints)
 	{
-		TArray<FVector> NetworkSimplifiedPoints;
-		Network->BuildStrokePreview(
-			StrokePoints,
-			NetworkSimplifiedPoints,
-			PreviewIntersections);
-		bHasSnapTarget = Network->FindSnapPreviewTarget(
-			CursorLocation,
-			SnapTargetLocation);
+		StrokePreviewState.Reset();
+		SimplifiedStrokePoints.Reset();
+		PreviewIntersections.Reset();
 	}
+	bStrokePreviewPending = true;
+	bHasSnapTarget = false;
+	if (!FindNetwork())
+	{
+		StrokePreviewState.Reset();
+		bStrokePreviewPending = false;
+		return;
+	}
+	ARoadNetworkActor* Network = FindNetwork();
+	bHasSnapTarget = Network->FindSnapPreviewTarget(
+		CursorLocation,
+		SnapTargetLocation);
 }
 
 void URoadPaintTool::OnClickPress(const FInputDeviceRay& PressPos)
@@ -286,7 +244,9 @@ void URoadPaintTool::OnClickRelease(const FInputDeviceRay& ReleasePos)
 	StrokePoints.Reset();
 	SimplifiedStrokePoints.Reset();
 	PreviewIntersections.Reset();
+	StrokePreviewState.Reset();
 	bHasSnapTarget = false;
+	bStrokePreviewPending = false;
 }
 
 void URoadPaintTool::OnTerminateDragSequence()
@@ -295,7 +255,9 @@ void URoadPaintTool::OnTerminateDragSequence()
 	StrokePoints.Reset();
 	SimplifiedStrokePoints.Reset();
 	PreviewIntersections.Reset();
+	StrokePreviewState.Reset();
 	bHasSnapTarget = false;
+	bStrokePreviewPending = false;
 }
 
 void URoadPaintTool::OnUpdateModifierState(int ModifierID, bool bIsOn)

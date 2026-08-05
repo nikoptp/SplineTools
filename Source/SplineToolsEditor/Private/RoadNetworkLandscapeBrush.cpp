@@ -4,6 +4,9 @@
 #include "Engine/Canvas.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
+#include "Landscape.h"
+#include "LandscapeComponent.h"
+#include "LandscapeInfo.h"
 #include "RoadNetworkActor.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RoadNetworkLandscapeBrush)
@@ -49,6 +52,61 @@ void ARoadNetworkLandscapeBrush::Configure(
 		AffectedWeightmapLayers.AddUnique(PaintLayer.WeightmapLayerName);
 	}
 	MarkPackageDirty();
+}
+
+void ARoadNetworkLandscapeBrush::MarkTargetLayerComponentsDirty()
+{
+	ALandscape* Landscape = GetOwningLandscape();
+	ULandscapeInfo* LandscapeInfo = Landscape ? Landscape->GetLandscapeInfo() : nullptr;
+	if (!LandscapeInfo)
+	{
+		return;
+	}
+
+	const FVector LandscapeScale = Landscape->GetTransform().GetScale3D().GetAbs();
+	const float RadiusScaleX = LandscapeScale.X > KINDA_SMALL_NUMBER
+		? 1.0f / LandscapeScale.X
+		: 1.0f;
+	const float RadiusScaleY = LandscapeScale.Y > KINDA_SMALL_NUMBER
+		? 1.0f / LandscapeScale.Y
+		: 1.0f;
+	const FTransform WorldToLandscape = Landscape->GetTransform().Inverse();
+	FBox2D TargetBounds(EForceInit::ForceInit);
+	for (const FRoadLandscapeBrushLayer& PaintLayer : PaintLayers)
+	{
+		for (const FRoadLandscapeBrushSegment& Segment : PaintLayer.Segments)
+		{
+			const FVector LocalStart = WorldToLandscape.TransformPosition(Segment.WorldStart);
+			const FVector LocalEnd = WorldToLandscape.TransformPosition(Segment.WorldEnd);
+			const float Radius = Segment.CoreHalfWidth + Segment.Falloff;
+			const FVector2D RadiusOffset(Radius * RadiusScaleX, Radius * RadiusScaleY);
+			TargetBounds += FVector2D(LocalStart.X, LocalStart.Y) - RadiusOffset;
+			TargetBounds += FVector2D(LocalStart.X, LocalStart.Y) + RadiusOffset;
+			TargetBounds += FVector2D(LocalEnd.X, LocalEnd.Y) - RadiusOffset;
+			TargetBounds += FVector2D(LocalEnd.X, LocalEnd.Y) + RadiusOffset;
+		}
+	}
+
+	if (!TargetBounds.bIsValid)
+	{
+		return;
+	}
+
+	TSet<ULandscapeComponent*> TargetComponents;
+	LandscapeInfo->GetComponentsInRegion(
+		FMath::FloorToInt(TargetBounds.Min.X),
+		FMath::FloorToInt(TargetBounds.Min.Y),
+		FMath::CeilToInt(TargetBounds.Max.X),
+		FMath::CeilToInt(TargetBounds.Max.Y),
+		TargetComponents,
+		true);
+	for (ULandscapeComponent* Component : TargetComponents)
+	{
+		if (Component)
+		{
+			Component->RequestWeightmapUpdate(false, false);
+		}
+	}
 }
 
 bool ARoadNetworkLandscapeBrush::IsManagedBy(const FGuid& InNetworkId) const
@@ -136,7 +194,7 @@ UTextureRenderTarget2D* ARoadNetworkLandscapeBrush::RenderLayer_Native(
 		InParameters.CombinedResult->GetResource(),
 		FVector2D(OutputRenderTarget->SizeX, OutputRenderTarget->SizeY),
 		FLinearColor::White);
-	SourceTile.BlendMode = SE_BLEND_Opaque;
+	SourceTile.BlendMode = SE_BLEND_AlphaBlend;
 	Canvas.DrawItem(SourceTile);
 
 	const FVector LandscapeScale = LandscapeTransform.GetScale3D().GetAbs();
@@ -147,8 +205,8 @@ UTextureRenderTarget2D* ARoadNetworkLandscapeBrush::RenderLayer_Native(
 		? 1.0f / LandscapeScale.Y
 		: 1.0f;
 	const float RadiusPixelScale = FMath::Max(PixelScaleX, PixelScaleY);
-	constexpr int32 FalloffBandCount = 8;
 
+	constexpr int32 FalloffBandCount = 8;
 	for (const FRoadLandscapeBrushSegment& Segment : PaintLayer->Segments)
 	{
 		FVector LocalStart = LandscapeTransform.InverseTransformPosition(Segment.WorldStart);
@@ -166,17 +224,19 @@ UTextureRenderTarget2D* ARoadNetworkLandscapeBrush::RenderLayer_Native(
 		const float FalloffRadius = FMath::Max(0.0f, Segment.Falloff * RadiusPixelScale);
 		const float Angle = FMath::RadiansToDegrees(FMath::Atan2(Direction.Y, Direction.X));
 		const FVector2D Midpoint = (Start + End) * 0.5f;
-		float AccumulatedOpacity = 0.0f;
-
 		for (int32 BandIndex = FalloffBandCount; BandIndex >= 0; --BandIndex)
 		{
-			const float TargetOpacity = 1.0f - static_cast<float>(BandIndex) / FalloffBandCount;
+			const float TargetOpacity = 1.0f
+				- static_cast<float>(BandIndex) / FalloffBandCount;
+			const float PreviousOpacity = BandIndex == FalloffBandCount
+				? 0.0f
+				: 1.0f - static_cast<float>(BandIndex + 1) / FalloffBandCount;
 			const float BandRadius = CoreRadius
 				+ FalloffRadius * static_cast<float>(BandIndex) / FalloffBandCount;
 			const float BlendOpacity = TargetOpacity >= 1.0f
 				? 1.0f
-				: (TargetOpacity - AccumulatedOpacity) / FMath::Max(1.0f - AccumulatedOpacity, KINDA_SMALL_NUMBER);
-			AccumulatedOpacity = TargetOpacity;
+				: (TargetOpacity - PreviousOpacity)
+				/ FMath::Max(1.0f - PreviousOpacity, KINDA_SMALL_NUMBER);
 			if (BlendOpacity <= 0.0f)
 			{
 				continue;

@@ -182,6 +182,49 @@ bool FRoadPaintUndoRemovesGeneratedActorsTest::RunTest(const FString& Parameters
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FRoadPaintPreviewIsTimeSlicedTest,
+	"SplineTools.RoadPainting.TimeSlicesStrokePreview",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadPaintPreviewIsTimeSlicedTest::RunTest(const FString& Parameters)
+{
+	FScopedRoadTestWorld TestWorld;
+	ARoadNetworkActor* Network = TestWorld.SpawnNetwork();
+	Network->SimplificationTolerance = 0.0f;
+	TArray<FVector> StrokePoints;
+	for (int32 PointIndex = 0; PointIndex < 12; ++PointIndex)
+	{
+		StrokePoints.Add(FVector(
+			PointIndex * 100.0f,
+			(PointIndex % 2) * 100.0f,
+			0.0f));
+	}
+
+	FRoadStrokePreviewState PreviewState;
+	TArray<FVector> SimplifiedPoints;
+	TArray<FVector> Intersections;
+	int32 BuildCalls = 0;
+	bool bComplete = false;
+	while (!bComplete && BuildCalls < 100)
+	{
+		bComplete = Network->BuildStrokePreview(
+			StrokePoints,
+			PreviewState,
+			SimplifiedPoints,
+			Intersections);
+		++BuildCalls;
+	}
+
+	TestTrue(TEXT("Stroke preview completes across bounded calls"), bComplete);
+	TestTrue(TEXT("Stroke preview required more than one bounded call"), BuildCalls > 1);
+	TestEqual(
+		TEXT("Time-sliced preview preserves the simplified stroke"),
+		SimplifiedPoints.Num(),
+		StrokePoints.Num());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FRoadPaintInsertPointTest,
 	"SplineTools.RoadPainting.InsertsPointOnSelectedLink",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

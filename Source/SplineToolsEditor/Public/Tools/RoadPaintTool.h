@@ -5,6 +5,7 @@
 #include "BaseBehaviors/MouseWheelBehavior.h"
 #include "InteractiveToolBuilder.h"
 #include "ProceduralRoadActor.h"
+#include "RoadNetworkActor.h"
 #include "RoadPaintTool.generated.h"
 
 class AProceduralRoadJunctionActor;
@@ -67,6 +68,7 @@ public:
 
 	virtual void Setup() override;
 	virtual void Shutdown(EToolShutdownType ShutdownType) override;
+	virtual void OnTick(float DeltaTime) override;
 	virtual void Render(IToolsContextRenderAPI* RenderAPI) override;
 	virtual FInputRayHit CanBeginClickDragSequence(const FInputDeviceRay& PressPos) override;
 	virtual void OnClickPress(const FInputDeviceRay& PressPos) override;
@@ -101,9 +103,11 @@ private:
 	TArray<FVector> StrokePoints;
 	TArray<FVector> SimplifiedStrokePoints;
 	TArray<FVector> PreviewIntersections;
+	FRoadStrokePreviewState StrokePreviewState;
 	FVector CursorLocation = FVector::ZeroVector;
 	FVector SnapTargetLocation = FVector::ZeroVector;
 	bool bHasCursor = false;
 	bool bHasSnapTarget = false;
 	bool bDragging = false;
+	bool bStrokePreviewPending = false;
 };

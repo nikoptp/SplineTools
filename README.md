@@ -171,6 +171,9 @@ not release the mouse drag to normal viewport camera controls.
 While dragging, the viewport shows the sampled route, simplified preview, snap
 target, and prospective intersections. Generated actors are created only when
 the stroke is released.
+Preview intersection checks are processed incrementally with a 20-work-item
+per-frame budget so large networks do not block the editor while the preview
+finishes.
 
 Choose the road Blueprint class per stroke. Each resulting graph link retains
 that class. Compatible degree-two links are grouped into one maximal spline;
@@ -209,6 +212,10 @@ brush actors managed by the road network. One brush is created for each loaded
 Landscape/edit-layer combination, and changing or deleting roads updates that
 non-destructive brush contribution. Mixed road Blueprint classes can paint
 different material layers and widths in one network.
+Brush synchronization is time-sliced with the same 20-work-item-per-frame budget
+and resumes automatically on later editor ticks. Once synchronization finishes,
+the network queues one editing-weightmap update; each brush renders its complete
+target-layer mask during that Landscape pass.
 
 The target Landscape must have Edit Layers enabled, and the Layer Info name must
 exist in its Landscape material. The brush copies Unreal's existing combined
