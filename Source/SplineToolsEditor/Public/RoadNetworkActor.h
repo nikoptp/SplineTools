@@ -201,6 +201,9 @@ public:
 	void RebuildAll();
 
 	UFUNCTION(CallInEditor, Category = "Road Painting")
+	void RebuildLandscapePaint();
+
+	UFUNCTION(CallInEditor, Category = "Road Painting")
 	void AdoptSelected();
 
 	UFUNCTION(CallInEditor, Category = "Road Painting")

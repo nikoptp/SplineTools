@@ -1738,13 +1738,13 @@ void ARoadNetworkActor::RebuildGeneratedActors()
 	{
 		Junction->RebuildJunctionMesh();
 	}
-	RebuildLandscapeMaterialPaint();
 	GeneratedRuns = MoveTemp(NewGeneratedRuns);
 	GeneratedJunctions = MoveTemp(NewGeneratedJunctions);
 	DirtyLinkIds.Reset();
 	DirtyPointIds.Reset();
 	bForceFullRebuild = false;
 	bForceJunctionRebuild = false;
+	LandscapePaintStatus = TEXT("Landscape paint is out of date. Use Rebuild Paint in Road Painting mode.");
 	MarkPackageDirty();
 }
 
@@ -2647,6 +2647,11 @@ void ARoadNetworkActor::RebuildAll()
 {
 	bForceFullRebuild = true;
 	RebuildGeneratedActors();
+}
+
+void ARoadNetworkActor::RebuildLandscapePaint()
+{
+	RebuildLandscapeMaterialPaint();
 }
 
 void ARoadNetworkActor::AdoptSelected()

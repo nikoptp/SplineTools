@@ -22,6 +22,7 @@ void FRoadPaintingEditorModeCommands::RegisterCommands()
 	UI_COMMAND(AdoptSelectedRoads, "Adopt Selected", "Import selected procedural roads and junctions", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND(RebuildDirty, "Rebuild Dirty", "Rebuild affected managed roads and refresh all managed junction caches", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND(RebuildAll, "Rebuild All", "Regenerate the complete managed road network", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(RebuildLandscapePaint, "Rebuild Landscape Paint", "Synchronize and rasterize the road Landscape material masks", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND(Validate, "Validate", "Validate graph identities, links, and classes", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND(FrameNetwork, "Frame Network", "Frame the road network or selected element in the viewport", EUserInterfaceActionType::Button, FInputChord(EKeys::F));
 	UI_COMMAND(InsertPoint, "Insert Point", "Insert a control point on the selected road link", EUserInterfaceActionType::Button, FInputChord());
@@ -32,6 +33,7 @@ void FRoadPaintingEditorModeCommands::RegisterCommands()
 	ToolCommands.Add(AdoptSelectedRoads);
 	ToolCommands.Add(RebuildDirty);
 	ToolCommands.Add(RebuildAll);
+	ToolCommands.Add(RebuildLandscapePaint);
 	ToolCommands.Add(Validate);
 	ToolCommands.Add(FrameNetwork);
 	ToolCommands.Add(InsertPoint);

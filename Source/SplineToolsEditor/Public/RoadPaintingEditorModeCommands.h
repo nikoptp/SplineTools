@@ -16,6 +16,7 @@ public:
 	TSharedPtr<FUICommandInfo> AdoptSelectedRoads;
 	TSharedPtr<FUICommandInfo> RebuildDirty;
 	TSharedPtr<FUICommandInfo> RebuildAll;
+	TSharedPtr<FUICommandInfo> RebuildLandscapePaint;
 	TSharedPtr<FUICommandInfo> Validate;
 	TSharedPtr<FUICommandInfo> FrameNetwork;
 	TSharedPtr<FUICommandInfo> InsertPoint;

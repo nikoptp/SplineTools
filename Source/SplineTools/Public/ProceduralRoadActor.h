@@ -152,6 +152,8 @@ public:
 		const AActor* JunctionOwner) const;
 
 #if WITH_EDITOR
+	virtual void PostEditUndo() override;
+
 	void GetRoadSplinePoints(TArray<FProceduralRoadSplinePoint>& OutPoints) const;
 	void SetRoadSplinePoints(
 		const TArray<FProceduralRoadSplinePoint>& Points,

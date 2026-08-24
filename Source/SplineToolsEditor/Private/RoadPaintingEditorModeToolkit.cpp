@@ -206,6 +206,24 @@ TSharedPtr<SWidget> FRoadPaintingEditorModeToolkit::GetInlineContent() const
 			+ SUniformGridPanel::Slot(0, 2)
 			[
 				SNew(SButton)
+				.Text(LOCTEXT("RebuildLandscapePaintButton", "Rebuild Paint"))
+				.ToolTipText(LOCTEXT("RebuildLandscapePaintTooltip", "Synchronize and rasterize road Landscape material masks. Run this after editing roads; normal Landscape painting reuses the cached masks."))
+				.IsEnabled_Lambda([WeakMode = Mode]()
+				{
+					return WeakMode.IsValid() && WeakMode->CanRebuild();
+				})
+				.OnClicked_Lambda([WeakMode = Mode]()
+				{
+					if (WeakMode.IsValid())
+					{
+						WeakMode->RebuildLandscapePaint();
+					}
+					return FReply::Handled();
+				})
+			]
+			+ SUniformGridPanel::Slot(0, 3)
+			[
+				SNew(SButton)
 				.Text(LOCTEXT("ValidateButton", "Validate"))
 				.ToolTipText(LOCTEXT("ValidateTooltip", "Check graph identities, links, generated actors, and classes."))
 				.IsEnabled_Lambda([WeakMode = Mode]()
@@ -221,7 +239,7 @@ TSharedPtr<SWidget> FRoadPaintingEditorModeToolkit::GetInlineContent() const
 					return FReply::Handled();
 				})
 			]
-			+ SUniformGridPanel::Slot(1, 2)
+			+ SUniformGridPanel::Slot(1, 3)
 			[
 				SNew(SButton)
 				.Text(LOCTEXT("FrameButton", "Frame"))
@@ -239,7 +257,7 @@ TSharedPtr<SWidget> FRoadPaintingEditorModeToolkit::GetInlineContent() const
 					return FReply::Handled();
 				})
 			]
-			+ SUniformGridPanel::Slot(0, 3)
+			+ SUniformGridPanel::Slot(0, 4)
 			[
 				SNew(SButton)
 				.Text(LOCTEXT("InsertPointButton", "Insert Point"))

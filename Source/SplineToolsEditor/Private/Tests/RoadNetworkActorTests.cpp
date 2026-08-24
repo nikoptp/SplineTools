@@ -322,6 +322,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FRoadPaintLandscapeConfigurationTest::RunTest(const FString& Parameters)
 {
 	TestNotNull(
+		TEXT("Landscape paint rebuild is exposed as a separate editor action"),
+		ARoadNetworkActor::StaticClass()->FindFunctionByName(
+			GET_FUNCTION_NAME_CHECKED(ARoadNetworkActor, RebuildLandscapePaint)));
+	TestNotNull(
 		TEXT("Landscape paint settings are owned by procedural road classes"),
 		FindFProperty<FProperty>(
 			AProceduralRoadActor::StaticClass(),

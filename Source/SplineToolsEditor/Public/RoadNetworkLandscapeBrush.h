@@ -66,6 +66,8 @@ public:
 
 private:
 	void EnsureOutputRenderTarget(const UTextureRenderTarget2D* SourceRenderTarget);
+	void EnsureRoadMaskRenderTarget(FName WeightmapLayerName, const UTextureRenderTarget2D* SourceRenderTarget);
+	void RebuildRoadMask(FName WeightmapLayerName);
 
 	UPROPERTY()
 	TSoftObjectPtr<ARoadNetworkActor> RoadNetwork;
@@ -81,6 +83,11 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UTextureRenderTarget2D> OutputRenderTarget;
+
+	UPROPERTY(Transient)
+	TMap<FName, TObjectPtr<UTextureRenderTarget2D>> RoadMaskRenderTargets;
+
+	TSet<FName> PendingRoadMaskLayers;
 
 	FTransform LandscapeTransform = FTransform::Identity;
 	FIntPoint LandscapeSize = FIntPoint::ZeroValue;

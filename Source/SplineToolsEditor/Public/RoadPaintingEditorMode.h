@@ -28,6 +28,7 @@ public:
 	void AdoptSelectedRoads();
 	void RebuildDirty();
 	void RebuildAll();
+	void RebuildLandscapePaint();
 	void ValidateNetwork();
 	void FrameNetwork();
 	void InsertPoint();

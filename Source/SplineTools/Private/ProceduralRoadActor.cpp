@@ -130,9 +130,18 @@ void AProceduralRoadActor::PostInitializeComponents()
 	RestoreCachedRoadComponents();
 }
 
+#if WITH_EDITOR
+void AProceduralRoadActor::PostEditUndo()
+{
+	RestoreCachedRoadComponents();
+	Super::PostEditUndo();
+}
+#endif
+
 void AProceduralRoadActor::RebuildSplineTool()
 {
 	UpdateSplineSettings();
+	RestoreCachedRoadComponents();
 	if (!IsSplineUsable())
 	{
 		ResetGeneratedContent();
@@ -722,6 +731,18 @@ bool AProceduralRoadActor::ShouldRebuildInGameWorld() const
 
 void AProceduralRoadActor::ResetGeneratedDecals()
 {
+	TArray<UDecalComponent*> DecalComponents;
+	GetComponents(DecalComponents);
+	for (UDecalComponent* DecalComponent : DecalComponents)
+	{
+		if (DecalComponent
+			&& DecalComponent->GetName().StartsWith(TEXT("RoadDecal_"))
+			&& !GeneratedDecals.Contains(DecalComponent))
+		{
+			GeneratedDecals.Add(DecalComponent);
+		}
+	}
+
 	for (int32 DecalIndex = GeneratedDecals.Num() - 1; DecalIndex >= 0; --DecalIndex)
 	{
 		if (!GeneratedDecals[DecalIndex])

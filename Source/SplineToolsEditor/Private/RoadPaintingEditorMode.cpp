@@ -55,6 +55,10 @@ void URoadPaintingEditorMode::Enter()
 		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::RebuildAll),
 		FCanExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CanRebuild));
 	Toolkit->GetToolkitCommands()->MapAction(
+		Commands.RebuildLandscapePaint,
+		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::RebuildLandscapePaint),
+		FCanExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CanRebuild));
+	Toolkit->GetToolkitCommands()->MapAction(
 		Commands.Validate,
 		FExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::ValidateNetwork),
 		FCanExecuteAction::CreateUObject(this, &URoadPaintingEditorMode::CanRebuild));
@@ -176,6 +180,17 @@ void URoadPaintingEditorMode::RebuildAll()
 		Network->Modify();
 		Network->RebuildAll();
 		LastOperationText = LOCTEXT("RebuiltAllRoads", "The complete road network was rebuilt.");
+	}
+}
+
+void URoadPaintingEditorMode::RebuildLandscapePaint()
+{
+	if (ARoadNetworkActor* Network = FindRoadNetwork())
+	{
+		const FScopedTransaction Transaction(LOCTEXT("RebuildRoadLandscapePaint", "Rebuild Road Landscape Paint"));
+		Network->Modify();
+		Network->RebuildLandscapePaint();
+		LastOperationText = LOCTEXT("RebuiltRoadLandscapePaint", "Road Landscape paint is rebuilding from the current network.");
 	}
 }
 
