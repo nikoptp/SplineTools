@@ -1,8 +1,10 @@
 #include "ProceduralRoadActor.h"
 
 #include "Components/DecalComponent.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/SplineComponent.h"
 #include "Engine/World.h"
+#include "Engine/StaticMesh.h"
 #include "KismetProceduralMeshLibrary.h"
 #include "Materials/MaterialInterface.h"
 #include "ProceduralMeshComponent.h"
@@ -97,6 +99,15 @@ namespace
 
 		return SampleCrossSection(CrossSections.Last(), RoadWidth, LateralOffset);
 	}
+
+	int32 MakeRoadsideRandomSeed(int32 BaseSeed, int32 DefinitionIndex, int32 SideSign, int32 StreamIndex)
+	{
+		uint32 Seed = GetTypeHash(BaseSeed);
+		Seed = HashCombine(Seed, GetTypeHash(DefinitionIndex));
+		Seed = HashCombine(Seed, GetTypeHash(SideSign));
+		Seed = HashCombine(Seed, GetTypeHash(StreamIndex));
+		return static_cast<int32>(Seed);
+	}
 }
 
 AProceduralRoadActor::AProceduralRoadActor()
@@ -151,6 +162,9 @@ void AProceduralRoadActor::RebuildSplineTool()
 		UpdateRoadChunks();
 		ResetGeneratedDecals();
 		GenerateDecals();
+		ResetGeneratedRoadsideMeshes();
+		GenerateRoadsideMeshes();
+		FinalizeGeneratedContent();
 	}
 
 #if WITH_EDITOR
@@ -447,6 +461,34 @@ bool AProceduralRoadActor::GetJunctionEdgeGeometry(
 	return true;
 }
 
+bool AProceduralRoadActor::GetJunctionSideLineEdge(ERoadSplineEndpoint Endpoint, float TrimDistance, bool bLeft, FProceduralRoadLineEdge& OutEdge) const
+{
+	OutEdge = FProceduralRoadLineEdge();
+	if (!bGenerateSideLines || !RoadLineMaterial || RoadLineWidth >= RoadWidth)
+	{
+		return false;
+	}
+	FProceduralRoadJunctionEdgeGeometry Geometry;
+	if (!GetJunctionEdgeGeometry(Endpoint, TrimDistance, Geometry))
+	{
+		return false;
+	}
+	FSplineRoadCrossSection Section;
+	Section.RoadPoints = MoveTemp(Geometry.SurfacePoints);
+	const float SideOffset = FMath::Clamp(RoadWidth * 0.5f - SideLineInset, RoadLineWidth * 0.5f, RoadWidth * 0.5f - RoadLineWidth * 0.5f);
+	const float Side = bLeft ? -1.0f : 1.0f;
+	OutEdge.Inner = SampleCrossSection(Section, RoadWidth, Side * (SideOffset - RoadLineWidth * 0.5f)) + FVector::UpVector * RoadLineSurfaceOffset;
+	OutEdge.Outer = SampleCrossSection(Section, RoadWidth, Side * (SideOffset + RoadLineWidth * 0.5f)) + FVector::UpVector * RoadLineSurfaceOffset;
+	OutEdge.Direction = Geometry.Direction;
+	OutEdge.Material = RoadLineMaterial;
+	OutEdge.SurfaceOffset = RoadLineSurfaceOffset;
+	OutEdge.UVWorldLength = RoadLineUVWorldLength;
+	OutEdge.V = (Endpoint == ERoadSplineEndpoint::Start ? GetEffectiveStartDistance() : GetEffectiveEndDistance()) / FMath::Max(RoadLineUVWorldLength, 1.0f);
+	OutEdge.OuterU = bLeft ? 0.0f : 1.0f;
+	OutEdge.VDirection = Endpoint == ERoadSplineEndpoint::Start ? -1.0f : 1.0f;
+	return true;
+}
+
 float AProceduralRoadActor::GetRoadSplineLength() const
 {
 	return IsSplineUsable() ? ToolSpline->GetSplineLength() : 0.0f;
@@ -655,6 +697,7 @@ void AProceduralRoadActor::ResetGeneratedContent()
 	RoadChunkSourceHashes.Reset();
 
 	ResetGeneratedDecals();
+	ResetGeneratedRoadsideMeshes();
 	Super::ResetGeneratedContent();
 }
 
@@ -719,6 +762,8 @@ void AProceduralRoadActor::RestoreCachedRoadComponents()
 		{
 			return !IsValid(DecalComponent);
 		});
+
+	RestoreCachedRoadsideComponents();
 }
 
 bool AProceduralRoadActor::ShouldRebuildInGameWorld() const
@@ -756,6 +801,344 @@ void AProceduralRoadActor::ResetGeneratedDecals()
 	GeneratedDecals.Empty();
 }
 
+void AProceduralRoadActor::ResetGeneratedRoadsideMeshes()
+{
+	RestoreCachedRoadsideComponents();
+	for (int32 ComponentIndex = GeneratedRoadsideComponents.Num() - 1; ComponentIndex >= 0; --ComponentIndex)
+	{
+		DestroyGeneratedHISM(GeneratedRoadsideComponents[ComponentIndex]);
+	}
+	GeneratedRoadsideComponents.Empty();
+}
+
+void AProceduralRoadActor::RestoreCachedRoadsideComponents()
+{
+	TArray<UHierarchicalInstancedStaticMeshComponent*> RoadsideComponents;
+	GetComponents(RoadsideComponents);
+	for (UHierarchicalInstancedStaticMeshComponent* RoadsideComponent : RoadsideComponents)
+	{
+		if (RoadsideComponent
+			&& RoadsideComponent->GetName().StartsWith(TEXT("RoadsideMesh_"))
+			&& !GeneratedRoadsideComponents.Contains(RoadsideComponent))
+		{
+			GeneratedRoadsideComponents.Add(RoadsideComponent);
+			RegisterGeneratedHISM(RoadsideComponent);
+		}
+	}
+	GeneratedRoadsideComponents.RemoveAll(
+		[](const TObjectPtr<UHierarchicalInstancedStaticMeshComponent>& RoadsideComponent)
+		{
+			return !IsValid(RoadsideComponent);
+		});
+}
+
+void AProceduralRoadActor::GenerateRoadsideMeshes()
+{
+	if (RoadsideMeshDefinitions.IsEmpty())
+	{
+		return;
+	}
+
+	const float SplineLength = ToolSpline->GetSplineLength();
+	if (SplineLength <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	const bool bIsClosedLoop = ToolSpline->IsClosedLoop();
+	const float StartDistance = bIsClosedLoop ? 0.0f : GetEffectiveStartDistance();
+	const float EndDistance = bIsClosedLoop ? SplineLength : GetEffectiveEndDistance();
+	if (EndDistance - StartDistance <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	for (int32 DefinitionIndex = 0; DefinitionIndex < RoadsideMeshDefinitions.Num(); ++DefinitionIndex)
+	{
+		const FProceduralRoadsideMeshDefinition& Definition = RoadsideMeshDefinitions[DefinitionIndex];
+		if (!Definition.StartMesh && !Definition.MiddleMesh && !Definition.EndMesh)
+		{
+			continue;
+		}
+
+		TArray<float> MiddleDistances;
+		if (Definition.MiddleMesh)
+		{
+			const float MeshSpacing = FMath::Max(Definition.MeshSpacing, 1.0f);
+			const float MeshSpacingJitter = FMath::Max(Definition.MeshSpacingJitter, 0.0f);
+			const bool bHasBoundaryMeshes = !bIsClosedLoop
+				&& (Definition.StartMesh || Definition.EndMesh);
+			const bool bUseHalfSpacingAtBoundaries = bIsClosedLoop || !bHasBoundaryMeshes;
+			const float BoundarySpacingOffset = bUseHalfSpacingAtBoundaries
+				? MeshSpacing * 0.5f
+				: 0.0f;
+			FRandomStream SpacingRandom(MakeRoadsideRandomSeed(
+				Definition.RandomSeed,
+				DefinitionIndex,
+				0,
+				0));
+			float DistanceAlongSpline = StartDistance
+				+ (bHasBoundaryMeshes ? MeshSpacing : BoundarySpacingOffset);
+
+			while (bHasBoundaryMeshes
+				? DistanceAlongSpline < EndDistance - KINDA_SMALL_NUMBER
+				: DistanceAlongSpline <= EndDistance - BoundarySpacingOffset + KINDA_SMALL_NUMBER)
+			{
+				MiddleDistances.Add(DistanceAlongSpline);
+				const float IntervalJitter = MeshSpacingJitter > KINDA_SMALL_NUMBER
+					? SpacingRandom.FRandRange(-MeshSpacingJitter, MeshSpacingJitter)
+					: 0.0f;
+				DistanceAlongSpline += FMath::Max(MeshSpacing + IntervalJitter, 1.0f);
+			}
+		}
+
+		TArray<int32> SideSigns;
+		switch (Definition.Side)
+		{
+		case ERoadsideMeshSide::Left:
+			SideSigns.Add(-1);
+			break;
+		case ERoadsideMeshSide::Right:
+			SideSigns.Add(1);
+			break;
+		case ERoadsideMeshSide::Both:
+		default:
+			SideSigns.Add(-1);
+			SideSigns.Add(1);
+			break;
+		}
+
+		auto CreateRoadsideComponent = [this, &Definition, DefinitionIndex](
+			UStaticMesh* Mesh,
+			const TCHAR* RoleName) -> UHierarchicalInstancedStaticMeshComponent*
+		{
+			if (!Mesh)
+			{
+				return nullptr;
+			}
+
+			UHierarchicalInstancedStaticMeshComponent* MeshComponent = CreateGeneratedHISM(
+				FString::Printf(TEXT("RoadsideMesh_%d_%s"), DefinitionIndex, RoleName),
+				Mesh);
+			if (!MeshComponent)
+			{
+				return nullptr;
+			}
+
+			MeshComponent->SetCollisionEnabled(
+				Definition.bEnableCollision
+					? ECollisionEnabled::QueryAndPhysics
+					: ECollisionEnabled::NoCollision);
+			GeneratedRoadsideComponents.AddUnique(MeshComponent);
+			return MeshComponent;
+		};
+
+		UHierarchicalInstancedStaticMeshComponent* StartComponent =
+			!bIsClosedLoop
+				? CreateRoadsideComponent(Definition.StartMesh.Get(), TEXT("Start"))
+				: nullptr;
+		UHierarchicalInstancedStaticMeshComponent* MiddleComponent =
+			CreateRoadsideComponent(Definition.MiddleMesh.Get(), TEXT("Middle"));
+		UHierarchicalInstancedStaticMeshComponent* EndComponent =
+			!bIsClosedLoop
+				? CreateRoadsideComponent(Definition.EndMesh.Get(), TEXT("End"))
+				: nullptr;
+
+		for (int32 SideSign : SideSigns)
+		{
+			FRandomStream DistanceRandom(MakeRoadsideRandomSeed(
+				Definition.RandomSeed,
+				DefinitionIndex,
+				SideSign,
+				1));
+			FRandomStream HeightRandom(MakeRoadsideRandomSeed(
+				Definition.RandomSeed,
+				DefinitionIndex,
+				SideSign,
+				2));
+			FRandomStream RotationRandom(MakeRoadsideRandomSeed(
+				Definition.RandomSeed,
+				DefinitionIndex,
+				SideSign,
+				3));
+			auto AddInstance = [this, &Definition, SideSign, &DistanceRandom, &HeightRandom, &RotationRandom](
+				UHierarchicalInstancedStaticMeshComponent* MeshComponent,
+				float DistanceAlongSpline)
+			{
+				if (!MeshComponent)
+				{
+					return;
+				}
+
+				const float DistanceVariance = Definition.DistanceFromRoadCenterVariance > KINDA_SMALL_NUMBER
+					? DistanceRandom.FRandRange(
+						-Definition.DistanceFromRoadCenterVariance,
+						Definition.DistanceFromRoadCenterVariance)
+					: 0.0f;
+				const float HeightVariance = Definition.HeightOffsetVariance > KINDA_SMALL_NUMBER
+					? HeightRandom.FRandRange(
+						-Definition.HeightOffsetVariance,
+						Definition.HeightOffsetVariance)
+					: 0.0f;
+				const float RandomYawDegrees = Definition.Orientation == ERoadsideMeshOrientation::Random
+					&& Definition.RandomYawRangeDegrees > KINDA_SMALL_NUMBER
+					? RotationRandom.FRandRange(
+						-Definition.RandomYawRangeDegrees,
+						Definition.RandomYawRangeDegrees)
+					: 0.0f;
+
+				MeshComponent->AddInstance(
+					BuildRoadsideInstanceTransform(
+						Definition,
+						DistanceAlongSpline,
+						SideSign,
+						DistanceVariance,
+						HeightVariance,
+						RandomYawDegrees),
+					true);
+			};
+
+			if (!bIsClosedLoop && Definition.StartMesh)
+			{
+				AddInstance(StartComponent, StartDistance);
+			}
+			for (float DistanceAlongSpline : MiddleDistances)
+			{
+				AddInstance(MiddleComponent, DistanceAlongSpline);
+			}
+			if (!bIsClosedLoop && Definition.EndMesh)
+			{
+				AddInstance(EndComponent, EndDistance);
+			}
+		}
+	}
+}
+
+FTransform AProceduralRoadActor::BuildRoadsideInstanceTransform(
+	const FProceduralRoadsideMeshDefinition& Definition,
+	float DistanceAlongSpline,
+	int32 SideSign,
+	float DistanceVariance,
+	float HeightVariance,
+	float RandomYawDegrees) const
+{
+	FVector Tangent = ToolSpline->GetTangentAtDistanceAlongSpline(
+		DistanceAlongSpline,
+		ESplineCoordinateSpace::World).GetSafeNormal();
+	if (Tangent.IsNearlyZero())
+	{
+		Tangent = FVector::ForwardVector;
+	}
+
+	FVector RightVector = ToolSpline->GetRightVectorAtDistanceAlongSpline(
+		DistanceAlongSpline,
+		ESplineCoordinateSpace::World).GetSafeNormal();
+	if (RightVector.IsNearlyZero())
+	{
+		RightVector = FVector::CrossProduct(FVector::UpVector, Tangent).GetSafeNormal();
+	}
+	if (RightVector.IsNearlyZero())
+	{
+		RightVector = FVector::RightVector;
+	}
+
+	FVector SurfaceNormal = ToolSpline->GetUpVectorAtDistanceAlongSpline(
+		DistanceAlongSpline,
+		ESplineCoordinateSpace::World).GetSafeNormal();
+	if (SurfaceNormal.IsNearlyZero())
+	{
+		SurfaceNormal = FVector::UpVector;
+	}
+
+	const FVector SplineLocation = ToolSpline->GetLocationAtDistanceAlongSpline(
+		DistanceAlongSpline,
+		ESplineCoordinateSpace::World);
+	const float LateralDistance = FMath::Max(
+		Definition.DistanceFromRoadCenter + DistanceVariance,
+		0.0f);
+	const FVector DesiredPosition = SplineLocation
+		+ RightVector * (static_cast<float>(SideSign) * LateralDistance);
+	FVector InstanceLocation = DesiredPosition
+		+ SurfaceNormal * (Definition.HeightOffset + HeightVariance);
+
+	if (Definition.bAlignToLandscape)
+	{
+		FHitResult HitResult;
+		if (TraceTerrain(DesiredPosition, HitResult))
+		{
+			SurfaceNormal = HitResult.ImpactNormal.GetSafeNormal();
+			InstanceLocation = HitResult.ImpactPoint
+				+ SurfaceNormal * (Definition.HeightOffset + HeightVariance);
+		}
+	}
+
+	FVector ForwardVector = Tangent;
+	switch (Definition.Orientation)
+	{
+	case ERoadsideMeshOrientation::FaceRoad:
+		ForwardVector = -RightVector * static_cast<float>(SideSign);
+		break;
+	case ERoadsideMeshOrientation::FaceLane:
+		ForwardVector = Tangent * static_cast<float>(SideSign);
+		break;
+	case ERoadsideMeshOrientation::Random:
+	default:
+		ForwardVector = Tangent.RotateAngleAxis(RandomYawDegrees, SurfaceNormal);
+		break;
+	}
+
+	ForwardVector = FVector::VectorPlaneProject(
+		ForwardVector,
+		SurfaceNormal).GetSafeNormal();
+	if (ForwardVector.IsNearlyZero())
+	{
+		ForwardVector = FVector::VectorPlaneProject(
+			Tangent,
+			SurfaceNormal).GetSafeNormal();
+	}
+	if (ForwardVector.IsNearlyZero())
+	{
+		ForwardVector = FVector::ForwardVector;
+	}
+
+	FTransform InstanceTransform(
+		FRotationMatrix::MakeFromXZ(ForwardVector, SurfaceNormal).ToQuat(),
+		InstanceLocation,
+		Definition.MeshScale);
+	InstanceTransform.ConcatenateRotation(Definition.RotationOffset.Quaternion());
+	return InstanceTransform;
+}
+
+void AProceduralRoadActor::UpdateNoPassingRanges()
+{
+	NoPassingRanges.Reset();
+	if (!bGenerateCenterLine || !NoPassingLineMaterial || FMath::Max(CenterLineWidth + NoPassingLineWidth, NoPassingLineWidth * 2.0f) + NoPassingLineGap >= RoadWidth)
+	{
+		return;
+	}
+	const float Start = GetEffectiveStartDistance();
+	const float End = GetEffectiveEndDistance();
+	if (End <= Start)
+	{
+		return;
+	}
+	const int32 SegmentCount = FMath::Max(2, FMath::CeilToInt((End - Start) / FMath::Max(NoPassingSampleSpacing, 10.0f)));
+	TArray<FRoadNoPassingSample> Samples;
+	Samples.Reserve(SegmentCount + 1);
+	for (int32 Index = 0; Index <= SegmentCount; ++Index)
+	{
+		const float Distance = FMath::Lerp(Start, End, static_cast<float>(Index) / SegmentCount);
+		Samples.Add({Distance, SampleRoadPosition(Distance, 0.0f)});
+	}
+	FRoadNoPassingSettings Settings;
+	Settings.AnalysisDistance = NoPassingAnalysisDistance;
+	Settings.BendThresholdDegrees = NoPassingBendThresholdDegrees;
+	Settings.CrestThresholdDegrees = NoPassingCrestThresholdDegrees;
+	Settings.AdvanceDistance = NoPassingAdvanceDistance;
+	Settings.MinimumLength = NoPassingMinimumLength;
+	NoPassingRanges = RoadNoPassing::Analyze(Samples, Settings);
+}
+
 void AProceduralRoadActor::UpdateRoadChunks()
 {
 	GeneratedRoadChunks.RemoveAll(
@@ -782,6 +1165,7 @@ void AProceduralRoadActor::UpdateRoadChunks()
 		1);
 	EnsureRoadChunkCount(ChunkCount);
 	RoadChunkSourceHashes.SetNum(ChunkCount);
+	UpdateNoPassingRanges();
 
 	for (int32 ChunkIndex = 0; ChunkIndex < ChunkCount; ++ChunkIndex)
 	{
@@ -804,6 +1188,7 @@ void AProceduralRoadActor::UpdateRoadChunks()
 			SideFlapMaterial ? SideFlapMaterial.Get() : RoadMaterial.Get());
 		RoadChunk->SetMaterial(2, RoadLineMaterial);
 		RoadChunk->SetMaterial(3, GetCenterLineMaterial());
+		RoadChunk->SetMaterial(4, NoPassingLineMaterial);
 
 		const uint32 ChunkSourceHash = CalculateChunkSourceHash(
 			StartDistance,
@@ -915,6 +1300,25 @@ uint32 AProceduralRoadActor::CalculateChunkSourceHash(
 	ChunkHash = HashCombine(ChunkHash, GetTypeHash(bCenterLineHasGaps));
 	ChunkHash = HashCombine(ChunkHash, GetTypeHash(CenterLineDashLength));
 	ChunkHash = HashCombine(ChunkHash, GetTypeHash(CenterLineGapLength));
+	ChunkHash = HashCombine(ChunkHash, PointerHash(NoPassingLineMaterial.Get()));
+	ChunkHash = HashCombine(ChunkHash, GetTypeHash(NoPassingLineWidth));
+	ChunkHash = HashCombine(ChunkHash, GetTypeHash(NoPassingLineGap));
+	ChunkHash = HashCombine(ChunkHash, GetTypeHash(NoPassingSampleSpacing));
+	ChunkHash = HashCombine(ChunkHash, GetTypeHash(NoPassingAnalysisDistance));
+	ChunkHash = HashCombine(ChunkHash, GetTypeHash(NoPassingBendThresholdDegrees));
+	ChunkHash = HashCombine(ChunkHash, GetTypeHash(NoPassingCrestThresholdDegrees));
+	ChunkHash = HashCombine(ChunkHash, GetTypeHash(NoPassingAdvanceDistance));
+	ChunkHash = HashCombine(ChunkHash, GetTypeHash(NoPassingMinimumLength));
+	// Whole-road analysis can move a restriction into a chunk whose own spline did not change.
+	for (const FRoadNoPassingRange& Range : NoPassingRanges)
+	{
+		if (Range.End > StartDistance && Range.Start < EndDistance)
+		{
+			ChunkHash = HashCombine(ChunkHash, GetTypeHash(FMath::Max(Range.Start, StartDistance)));
+			ChunkHash = HashCombine(ChunkHash, GetTypeHash(FMath::Min(Range.End, EndDistance)));
+			ChunkHash = HashCombine(ChunkHash, GetTypeHash(Range.SideSign));
+		}
+	}
 	ChunkHash = HashCombine(ChunkHash, GetTypeHash(bGenerateCollision));
 	ChunkHash = HashCombine(ChunkHash, GetTypeHash(CollisionThickness));
 	ChunkHash = HashCombine(ChunkHash, GetTypeHash(CollisionSegmentStride));
@@ -1304,63 +1708,83 @@ void AProceduralRoadActor::BuildRoadLines(
 			RoadLineMaterial);
 	}
 
-	if (bGenerateCenterLine
-		&& GetCenterLineMaterial()
-		&& CenterLineWidth < RoadWidth)
+	if (bGenerateCenterLine && CenterLineWidth < RoadWidth)
 	{
 		TArray<FVector> CenterVertices;
 		TArray<int32> CenterTriangles;
 		TArray<FVector2D> CenterUVs;
-		if (!bCenterLineHasGaps)
+		TArray<FVector> YellowVertices;
+		TArray<int32> YellowTriangles;
+		TArray<FVector2D> YellowUVs;
+		TArray<float> Boundaries = {ChunkStartDistance, ChunkEndDistance};
+		for (const FRoadNoPassingRange& Range : NoPassingRanges)
 		{
-			AddLineRange(
-				CenterVertices,
-				CenterTriangles,
-				CenterUVs,
-				0.0f,
-				CenterLineWidth,
-				CenterLineSurfaceOffset,
-				CenterLineUVWorldLength,
-				ChunkStartDistance,
-				ChunkEndDistance);
-		}
-		else
-		{
-			const float DashLength = FMath::Max(CenterLineDashLength, 1.0f);
-			const float PatternLength =
-				DashLength + FMath::Max(CenterLineGapLength, 1.0f);
-			float PatternStart =
-				FMath::FloorToFloat(ChunkStartDistance / PatternLength)
-				* PatternLength;
-			for (; PatternStart < ChunkEndDistance; PatternStart += PatternLength)
+			if (Range.End > ChunkStartDistance && Range.Start < ChunkEndDistance)
 			{
-				const float DashStart = FMath::Max(PatternStart, ChunkStartDistance);
-				const float DashEnd = FMath::Min(
-					PatternStart + DashLength,
-					ChunkEndDistance);
-				AddLineRange(
-					CenterVertices,
-					CenterTriangles,
-					CenterUVs,
-					0.0f,
-					CenterLineWidth,
-					CenterLineSurfaceOffset,
-					CenterLineUVWorldLength,
-					DashStart,
-					DashEnd);
+				Boundaries.AddUnique(FMath::Max(Range.Start, ChunkStartDistance));
+				Boundaries.AddUnique(FMath::Min(Range.End, ChunkEndDistance));
 			}
 		}
+		Boundaries.Sort();
 
+		auto AddWhiteRange = [&](float Start, float End, float Offset)
+		{
+			if (!GetCenterLineMaterial())
+			{
+				return;
+			}
+			if (!bCenterLineHasGaps)
+			{
+				AddLineRange(CenterVertices, CenterTriangles, CenterUVs, Offset, CenterLineWidth, CenterLineSurfaceOffset, CenterLineUVWorldLength, Start, End);
+				return;
+			}
+			const float DashLength = FMath::Max(CenterLineDashLength, 1.0f);
+			const float PatternLength = DashLength + FMath::Max(CenterLineGapLength, 1.0f);
+			for (float PatternStart = FMath::FloorToFloat(Start / PatternLength) * PatternLength; PatternStart < End; PatternStart += PatternLength)
+			{
+				AddLineRange(CenterVertices, CenterTriangles, CenterUVs, Offset, CenterLineWidth, CenterLineSurfaceOffset, CenterLineUVWorldLength, FMath::Max(PatternStart, Start), FMath::Min(PatternStart + DashLength, End));
+			}
+		};
+
+		for (int32 Index = 0; Index + 1 < Boundaries.Num(); ++Index)
+		{
+			const float Midpoint = (Boundaries[Index] + Boundaries[Index + 1]) * 0.5f;
+			bool bLeft = false;
+			bool bRight = false;
+			for (const FRoadNoPassingRange& Range : NoPassingRanges)
+			{
+				if (Midpoint >= Range.Start && Midpoint < Range.End)
+				{
+					bLeft |= Range.SideSign < 0;
+					bRight |= Range.SideSign > 0;
+				}
+			}
+			if (!bLeft && !bRight)
+			{
+				AddWhiteRange(Boundaries[Index], Boundaries[Index + 1], 0.0f);
+				continue;
+			}
+			if (bLeft && bRight)
+			{
+				const float Offset = (NoPassingLineWidth + NoPassingLineGap) * 0.5f;
+				AddLineRange(YellowVertices, YellowTriangles, YellowUVs, -Offset, NoPassingLineWidth, CenterLineSurfaceOffset, CenterLineUVWorldLength, Boundaries[Index], Boundaries[Index + 1]);
+				AddLineRange(YellowVertices, YellowTriangles, YellowUVs, Offset, NoPassingLineWidth, CenterLineSurfaceOffset, CenterLineUVWorldLength, Boundaries[Index], Boundaries[Index + 1]);
+			}
+			else
+			{
+				const float Side = bRight ? 1.0f : -1.0f;
+				// Center the combined outer edges even when white and yellow widths differ.
+				AddWhiteRange(Boundaries[Index], Boundaries[Index + 1], -Side * (NoPassingLineWidth + NoPassingLineGap) * 0.5f);
+				AddLineRange(YellowVertices, YellowTriangles, YellowUVs, Side * (CenterLineWidth + NoPassingLineGap) * 0.5f, NoPassingLineWidth, CenterLineSurfaceOffset, CenterLineUVWorldLength, Boundaries[Index], Boundaries[Index + 1]);
+			}
+		}
 		if (!CenterVertices.IsEmpty())
 		{
-			CreateMeshSection(
-				RoadChunk,
-				3,
-				CenterVertices,
-				CenterTriangles,
-				CenterUVs,
-				TArray<FVector2D>(),
-				GetCenterLineMaterial());
+			CreateMeshSection(RoadChunk, 3, CenterVertices, CenterTriangles, CenterUVs, TArray<FVector2D>(), GetCenterLineMaterial());
+		}
+		if (!YellowVertices.IsEmpty())
+		{
+			CreateMeshSection(RoadChunk, 4, YellowVertices, YellowTriangles, YellowUVs, TArray<FVector2D>(), NoPassingLineMaterial);
 		}
 	}
 }

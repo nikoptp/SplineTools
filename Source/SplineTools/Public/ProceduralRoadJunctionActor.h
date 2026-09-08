@@ -92,6 +92,7 @@ private:
 	UMaterialInterface* GetEffectiveGroundBlendMaterial() const;
 	void RebuildJunctionInternal(bool bMarkDirty);
 	bool GenerateJunctionPatch();
+	void GenerateCornerLine(const FProceduralRoadLineEdge& Start, const FProceduralRoadLineEdge& End, const TArray<FVector>& SurfaceVertices, const TArray<int32>& SurfaceTriangles, int32& SectionIndex);
 	void UpdateEditorVisualization(bool bHasGeneratedMesh);
 	bool TraceTerrain(const FVector& DesiredPosition, FHitResult& OutHit) const;
 	FVector ProjectToTerrain(const FVector& DesiredPosition) const;
@@ -146,10 +147,24 @@ private:
 	float SurfaceOffset = 3.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (ClampMin = "25.0", AllowPrivateAccess = "true"))
-	float TerrainSampleSpacing = 150.0f;
+	float TerrainSampleSpacing = 75.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (ClampMin = "25.0", AllowPrivateAccess = "true"))
-	float GroundBlendSampleSpacing = 75.0f;
+	float GroundBlendSampleSpacing = 50.0f;
+
+	/** Smooth interior height deviations while preserving exact road mouth vertices. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (ClampMin = "0.0", ClampMax = "1.0", AllowPrivateAccess = "true"))
+	float InteriorSmoothingStrength = 0.65f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (ClampMin = "0", ClampMax = "16", AllowPrivateAccess = "true"))
+	int32 InteriorSmoothingIterations = 4;
+
+	/** Connect enabled road side lines around corners, leaving every road mouth open. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Lines", meta = (AllowPrivateAccess = "true"))
+	bool bGenerateEdgeLines = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Lines", meta = (ClampMin = "10.0", Units = "cm", AllowPrivateAccess = "true"))
+	float EdgeLineSampleSpacing = 25.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Terrain", meta = (ClampMin = "0.0", AllowPrivateAccess = "true"))
 	float MaximumInteriorTerrainDeviation = 50.0f;

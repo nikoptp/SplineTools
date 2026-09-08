@@ -66,15 +66,15 @@ void ASplineToolActorBase::UpdateSplineSettings()
 
 void ASplineToolActorBase::ResetGeneratedContent()
 {
-	for (int32 ComponentIndex = GeneratedInstanceComponents.Num() - 1; ComponentIndex >= 0; --ComponentIndex)
+	for (UHierarchicalInstancedStaticMeshComponent* MeshComponent : GeneratedInstanceComponents)
 	{
-		if (!GeneratedInstanceComponents[ComponentIndex])
+		if (!MeshComponent)
 		{
 			continue;
 		}
 
-		RemoveInstanceComponent(GeneratedInstanceComponents[ComponentIndex]);
-		GeneratedInstanceComponents[ComponentIndex]->DestroyComponent();
+		RemoveInstanceComponent(MeshComponent);
+		MeshComponent->DestroyComponent();
 	}
 
 	GeneratedInstanceComponents.Empty();
@@ -124,8 +124,33 @@ UHierarchicalInstancedStaticMeshComponent* ASplineToolActorBase::CreateGenerated
 	MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	MeshComponent->SetCollisionProfileName(TEXT("BlockAll"));
 	MeshComponent->SetupAttachment(SceneRoot);
-	GeneratedInstanceComponents.Add(MeshComponent);
+	RegisterGeneratedHISM(MeshComponent);
 	return MeshComponent;
+}
+
+void ASplineToolActorBase::RegisterGeneratedHISM(UHierarchicalInstancedStaticMeshComponent* MeshComponent)
+{
+	if (MeshComponent)
+	{
+		GeneratedInstanceComponents.AddUnique(MeshComponent);
+	}
+}
+
+void ASplineToolActorBase::UnregisterGeneratedHISM(UHierarchicalInstancedStaticMeshComponent* MeshComponent)
+{
+	GeneratedInstanceComponents.Remove(MeshComponent);
+}
+
+void ASplineToolActorBase::DestroyGeneratedHISM(UHierarchicalInstancedStaticMeshComponent* MeshComponent)
+{
+	if (!MeshComponent)
+	{
+		return;
+	}
+
+	UnregisterGeneratedHISM(MeshComponent);
+	RemoveInstanceComponent(MeshComponent);
+	MeshComponent->DestroyComponent();
 }
 
 bool ASplineToolActorBase::IsSplineUsable() const

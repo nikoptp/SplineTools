@@ -31,6 +31,9 @@ protected:
 	virtual bool ShouldRebuildInGameWorld() const;
 
 	UHierarchicalInstancedStaticMeshComponent* CreateGeneratedHISM(const FString& ComponentName, UStaticMesh* StaticMesh);
+	void RegisterGeneratedHISM(UHierarchicalInstancedStaticMeshComponent* MeshComponent);
+	void UnregisterGeneratedHISM(UHierarchicalInstancedStaticMeshComponent* MeshComponent);
+	void DestroyGeneratedHISM(UHierarchicalInstancedStaticMeshComponent* MeshComponent);
 	bool IsSplineUsable() const;
 	FTransform GetSplineTransformAtDistance(float DistanceAlongSpline) const;
 	FTransform BuildSplineInstanceTransform(

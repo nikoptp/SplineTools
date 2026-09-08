@@ -3,19 +3,117 @@
 #include "CoreMinimal.h"
 #include "Components/SplineComponent.h"
 #include "SplineToolActorBase.h"
+#include "RoadNoPassing.h"
 #include "ProceduralRoadActor.generated.h"
 
 class UDecalComponent;
+class UHierarchicalInstancedStaticMeshComponent;
 class ULandscapeLayerInfoObject;
 class UMaterialInterface;
 class UProceduralMeshComponent;
+class UStaticMesh;
 struct FSplineRoadCrossSection;
+
+/** Native rebuild-time contract for joining a junction ribbon to a cached road side line. */
+struct FProceduralRoadLineEdge
+{
+	FVector Inner = FVector::ZeroVector;
+	FVector Outer = FVector::ZeroVector;
+	FVector Direction = FVector::ZeroVector;
+	UMaterialInterface* Material = nullptr;
+	float SurfaceOffset = 0.0f;
+	float UVWorldLength = 100.0f;
+	float V = 0.0f;
+	float OuterU = 0.0f;
+	float VDirection = 1.0f;
+};
 
 UENUM(BlueprintType)
 enum class ERoadSplineEndpoint : uint8
 {
 	Start,
 	End,
+};
+
+UENUM(BlueprintType)
+enum class ERoadsideMeshSide : uint8
+{
+	Left,
+	Right,
+	Both,
+};
+
+UENUM(BlueprintType)
+enum class ERoadsideMeshOrientation : uint8
+{
+	Random,
+	FaceRoad,
+	FaceLane,
+};
+
+/** Blueprint-authored static meshes generated along a procedural road. */
+USTRUCT(BlueprintType)
+struct SPLINETOOLS_API FProceduralRoadsideMeshDefinition
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Meshes")
+	TObjectPtr<UStaticMesh> StartMesh;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Meshes")
+	TObjectPtr<UStaticMesh> MiddleMesh;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Meshes")
+	TObjectPtr<UStaticMesh> EndMesh;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement")
+	ERoadsideMeshSide Side = ERoadsideMeshSide::Both;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement")
+	ERoadsideMeshOrientation Orientation = ERoadsideMeshOrientation::FaceRoad;
+
+	/** Absolute distance from the road centerline in centimeters. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement", meta = (ClampMin = "0.0"))
+	float DistanceFromRoadCenter = 600.0f;
+
+	/** Random lateral distance variation in centimeters. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement", meta = (ClampMin = "0.0"))
+	float DistanceFromRoadCenterVariance = 0.0f;
+
+	/** Uniform offset along the local spline up axis in centimeters. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement")
+	float HeightOffset = 0.0f;
+
+	/** Random local-up offset variation in centimeters. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement", meta = (ClampMin = "0.0"))
+	float HeightOffsetVariance = 0.0f;
+
+	/** Distance between consecutive Middle mesh anchors in centimeters. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement", meta = (ClampMin = "1.0"))
+	float MeshSpacing = 5000.0f;
+
+	/** Maximum signed variation applied to each cumulative Middle interval. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement", meta = (ClampMin = "0.0"))
+	float MeshSpacingJitter = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement")
+	FVector MeshScale = FVector::OneVector;
+
+	/** Maximum signed random yaw used by Random orientation. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement", meta = (ClampMin = "0.0", ClampMax = "180.0"))
+	float RandomYawRangeDegrees = 180.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Placement")
+	FRotator RotationOffset = FRotator::ZeroRotator;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Terrain")
+	bool bAlignToLandscape = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Collision")
+	bool bEnableCollision = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Randomization")
+	int32 RandomSeed = 1337;
 };
 
 USTRUCT(BlueprintType)
@@ -140,6 +238,7 @@ public:
 		ERoadSplineEndpoint Endpoint,
 		float TrimDistance,
 		FProceduralRoadJunctionEdgeGeometry& OutGeometry) const;
+	bool GetJunctionSideLineEdge(ERoadSplineEndpoint Endpoint, float TrimDistance, bool bLeft, FProceduralRoadLineEdge& OutEdge) const;
 	float GetRoadSplineLength() const;
 	bool GetJunctionTrimDistance(
 		ERoadSplineEndpoint Endpoint,
@@ -181,6 +280,7 @@ protected:
 private:
 	void RestoreCachedRoadComponents();
 	void UpdateRoadChunks();
+	void UpdateNoPassingRanges();
 	void EnsureRoadChunkCount(int32 RequiredChunkCount);
 	UProceduralMeshComponent* CreateRoadChunk(int32 ChunkIndex);
 	void ConfigureRoadChunk(UProceduralMeshComponent* RoadChunk) const;
@@ -206,6 +306,16 @@ private:
 		const TArray<FSplineRoadCrossSection>& CrossSections);
 	void ResetGeneratedDecals();
 	void GenerateDecals();
+	void ResetGeneratedRoadsideMeshes();
+	void GenerateRoadsideMeshes();
+	void RestoreCachedRoadsideComponents();
+	FTransform BuildRoadsideInstanceTransform(
+		const FProceduralRoadsideMeshDefinition& Definition,
+		float DistanceAlongSpline,
+		int32 SideSign,
+		float DistanceVariance,
+		float HeightVariance,
+		float RandomYawDegrees) const;
 	FVector SampleRoadPosition(
 		float DistanceAlongSpline,
 		float LateralOffset,
@@ -299,6 +409,40 @@ private:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|Center", meta = (EditCondition = "bCenterLineHasGaps", ClampMin = "1.0", AllowPrivateAccess = "true"))
 	float CenterLineGapLength = 300.0f;
 
+	/** Assigning this material enables automatic restrictions when center lines are enabled. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|No Passing", meta = (EditCondition = "bGenerateCenterLine", AllowPrivateAccess = "true"))
+	TObjectPtr<UMaterialInterface> NoPassingLineMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|No Passing", meta = (ClampMin = "1.0", Units = "cm", AllowPrivateAccess = "true"))
+	float NoPassingLineWidth = 12.0f;
+
+	/** Clear space between the two center markings. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|No Passing", meta = (ClampMin = "0.0", Units = "cm", AllowPrivateAccess = "true"))
+	float NoPassingLineGap = 12.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|No Passing", meta = (ClampMin = "10.0", Units = "cm", AllowPrivateAccess = "true"))
+	float NoPassingSampleSpacing = 500.0f;
+
+	/** Distance sampled on each side when comparing horizontal heading and surface pitch. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|No Passing", meta = (ClampMin = "10.0", Units = "cm", AllowPrivateAccess = "true"))
+	float NoPassingAnalysisDistance = 2000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|No Passing", meta = (ClampMin = "0.01", ClampMax = "180.0", Units = "deg", AllowPrivateAccess = "true"))
+	float NoPassingBendThresholdDegrees = 12.0f;
+
+	/** A decrease in pitch indicates a crest; constant grades and valleys are unrestricted. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|No Passing", meta = (ClampMin = "0.01", ClampMax = "180.0", Units = "deg", AllowPrivateAccess = "true"))
+	float NoPassingCrestThresholdDegrees = 4.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|No Passing", meta = (ClampMin = "0.0", Units = "cm", AllowPrivateAccess = "true"))
+	float NoPassingAdvanceDistance = 2000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Lines|No Passing", meta = (ClampMin = "0.0", Units = "cm", AllowPrivateAccess = "true"))
+	float NoPassingMinimumLength = 2000.0f;
+
+	// Recomputed only during authored rebuilds; the mesh sections are the serialized runtime cache.
+	TArray<FRoadNoPassingRange> NoPassingRanges;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road|Terrain", meta = (AllowPrivateAccess = "true"))
 	bool bAlignToTerrain = true;
 
@@ -376,6 +520,14 @@ private:
 	/** Source hashes persisted with the mesh cache for selective editor rebuilds. */
 	UPROPERTY()
 	TArray<uint32> RoadChunkSourceHashes;
+
+	/** Serialized editor-built roadside HISM cache loaded directly by PIE and packaged builds. */
+	UPROPERTY()
+	TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> GeneratedRoadsideComponents;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Road|Roadside Meshes", meta = (AllowPrivateAccess = "true", ShowOnlyInnerProperties))
+	TArray<FProceduralRoadsideMeshDefinition> RoadsideMeshDefinitions;
+
 	TWeakObjectPtr<AActor> StartJunctionOwner;
 	TWeakObjectPtr<AActor> EndJunctionOwner;
 	float StartJunctionTrimDistance = 0.0f;

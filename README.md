@@ -17,7 +17,7 @@ Developed in an Unreal Engine 5.4 project.
   spline.
 - `AProceduralRoadActor` generates terrain-conforming road surfaces with
   world-uniform UVs, open bottoms, tucked terrain side flaps, convex collision,
-  and optional spline-spaced decals.
+  optional spline-spaced decals, and Blueprint-authored roadside HISM meshes.
 - The **Road Painting** editor mode turns landscape strokes into connected road
   splines and explicit junction actors while preserving ordinary actor editing.
 - Tools rebuild during construction and expose call-in-editor rebuild actions.
@@ -105,6 +105,40 @@ UV scale, and optional world-distance dash/gap lengths. If no center material is
 assigned, it falls back to the side-line material. The road surface material
 needs no marking logic. Unreal decal components cannot be instanced through
 ISM/HISM; keep optional decals for sparse wear or unique details.
+
+### Roadside Meshes
+
+Road Blueprint class defaults can define reusable roadside mesh profiles under
+**Road > Roadside Meshes**. Each profile may assign optional Start, Middle, and
+End static meshes, choose the left side, right side, or both sides of the road,
+and select Face Road, Face Lane, or Random orientation. Mesh +X is treated as
+forward and +Z as up; use the per-profile rotation offset for meshes authored in
+a different local orientation.
+
+The profile's distance from the road center, spacing, scale, height offset, and
+road-relative rotation can be tuned directly. Distance and height variance are
+deterministic per side, while spacing jitter is cumulative and deterministic.
+Both sides use the same longitudinal sample distances. For example, edge posts
+can use both sides, a 600 cm center distance, 5,000 cm spacing, and zero jitter;
+plowing markers can use random orientation and spacing jitter.
+
+Open roads place Start and End meshes at the effective, junction-trimmed
+boundaries. Middle meshes stay strictly between boundary meshes. A Middle-only
+profile is inset by half its configured spacing at both effective boundaries;
+with 5,000 cm spacing its samples begin at 2,500 cm and avoid cluttering road
+intersections. Closed loops use only the Middle mesh, apply the same half-spacing
+seam inset, and do not duplicate the loop seam. Landscape alignment is optional
+per profile and uses the road's existing terrain trace settings to place
+instances on and align them to the landscape normal.
+
+Collision is also optional per profile. Enabled profiles use the HISM BlockAll
+collision setup and the static mesh's authored collision, which is appropriate
+for guardrails and fences. Disabled profiles use NoCollision, which is suitable
+for decorative plowing markers.
+
+Roadside HISM components are generated and serialized by **Bake Road Cache**
+alongside road chunks and decals. PIE, standalone play, and packaged builds
+load the authored roadside cache without rebuilding it or tracing the landscape.
 
 ## Road Intersections
 
