@@ -293,7 +293,7 @@ float AProceduralRoadJunctionActor::GetEffectiveTrimDistance(
 {
 	if (!Connection.Road || !GetWorld())
 	{
-		return FMath::Max(Connection.TrimDistance, 0.0f);
+		return GetRequestedTrimDistance(Connection);
 	}
 
 	float PairedTrimDistance = 0.0f;
@@ -312,7 +312,7 @@ float AProceduralRoadJunctionActor::GetEffectiveTrimDistance(
 			if (OtherConnection.Road == Connection.Road
 				&& OtherConnection.Endpoint != Connection.Endpoint)
 			{
-				PairedTrimDistance = FMath::Max(OtherConnection.TrimDistance, 0.0f);
+				PairedTrimDistance = JunctionIterator->GetRequestedTrimDistance(OtherConnection);
 				bHasPairedJunction = true;
 				break;
 			}
@@ -323,7 +323,7 @@ float AProceduralRoadJunctionActor::GetEffectiveTrimDistance(
 		}
 	}
 
-	const float RequestedTrimDistance = FMath::Max(Connection.TrimDistance, 0.0f);
+	const float RequestedTrimDistance = GetRequestedTrimDistance(Connection);
 	if (!bHasPairedJunction)
 	{
 		return RequestedTrimDistance;
@@ -339,7 +339,15 @@ float AProceduralRoadJunctionActor::GetEffectiveTrimDistance(
 		: RequestedTrimDistance;
 }
 
+float AProceduralRoadJunctionActor::GetRequestedTrimDistance(
+	const FProceduralRoadJunctionConnection& Connection) const
+{
+	return FMath::Max(Connection.TrimDistance, 0.0f)
+		+ FMath::Max(RoadMouthPadding, 0.0f);
+}
+
 void AProceduralRoadJunctionActor::GatherNearbyJunctions(
+	const FVector& JunctionCenter,
 	TArray<AProceduralRoadJunctionActor*>& OutJunctions) const
 {
 	OutJunctions.Reset();
@@ -356,7 +364,7 @@ void AProceduralRoadJunctionActor::GatherNearbyJunctions(
 		AProceduralRoadJunctionActor* Junction = *JunctionIterator;
 		if (Junction != this
 			&& FVector2D::DistSquared(
-				FVector2D(GetActorLocation()),
+				FVector2D(JunctionCenter),
 				FVector2D(Junction->GetActorLocation())) <= SearchRadiusSquared)
 		{
 			OutJunctions.Add(Junction);
@@ -365,11 +373,12 @@ void AProceduralRoadJunctionActor::GatherNearbyJunctions(
 }
 
 FVector AProceduralRoadJunctionActor::ClampBlendPointToNearbyJunctions(
+	const FVector& JunctionCenter,
 	const FVector& InnerPoint,
 	const FVector& DesiredOuterPoint,
 	const TArray<AProceduralRoadJunctionActor*>& NearbyJunctions) const
 {
-	const FVector2D SelfCenter(GetActorLocation());
+	const FVector2D SelfCenter(JunctionCenter);
 	const FVector2D Inner(InnerPoint);
 	const FVector2D Extension(
 		DesiredOuterPoint.X - InnerPoint.X,
@@ -540,8 +549,23 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 		FVector Location = FVector::ZeroVector;
 		FVector Direction = FVector::ZeroVector;
 	};
+	struct FJunctionPortal
+	{
+		int32 ConnectionIndex = INDEX_NONE;
+		TObjectPtr<AProceduralRoadActor> Road;
+		ERoadSplineEndpoint Endpoint = ERoadSplineEndpoint::End;
+		float TrimDistance = 0.0f;
+		TArray<FVector> SurfacePoints;
+		FVector Direction = FVector::ZeroVector;
+		FVector LeftFlapPoint = FVector::ZeroVector;
+		FVector RightFlapPoint = FVector::ZeroVector;
+		bool bHasSideFlaps = false;
+	};
 
-	TArray<FBoundarySample> BoundarySamples;
+	// Keep each cached road mouth together. Sorting individual cross-section
+	// vertices lets adjacent roads interleave and produces crossing boundary
+	// spans at skewed intersections.
+	TArray<FJunctionPortal> Portals;
 	TArray<FCenterSupportSample> CenterSupportSamples;
 	for (int32 ConnectionIndex = 0;
 		ConnectionIndex < Connections.Num();
@@ -577,54 +601,91 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 		{
 			continue;
 		}
-		if (!EdgeGeometry.SurfacePoints.IsEmpty())
+		if (EdgeGeometry.SurfacePoints.Num() < 2)
 		{
-			FCenterSupportSample& CenterSupportSample =
-				CenterSupportSamples.AddDefaulted_GetRef();
-			for (const FVector& SurfacePoint : EdgeGeometry.SurfacePoints)
-			{
-				CenterSupportSample.Location += SurfacePoint;
-			}
-			CenterSupportSample.Location /= EdgeGeometry.SurfacePoints.Num();
-			CenterSupportSample.Direction = EdgeGeometry.Direction;
+			continue;
 		}
 
-		for (int32 EdgePointIndex = 0;
-			EdgePointIndex < EdgeGeometry.SurfacePoints.Num();
-			++EdgePointIndex)
+		FCenterSupportSample& CenterSupportSample =
+			CenterSupportSamples.AddDefaulted_GetRef();
+		for (const FVector& SurfacePoint : EdgeGeometry.SurfacePoints)
 		{
-			FBoundarySample& BoundarySample = BoundarySamples.AddDefaulted_GetRef();
-			BoundarySample.Location = EdgeGeometry.SurfacePoints[EdgePointIndex];
-			BoundarySample.ConnectionIndex = ConnectionIndex;
-			if (EdgePointIndex == 0 || EdgePointIndex == EdgeGeometry.SurfacePoints.Num() - 1)
-			{
-				FProceduralRoadLineEdge LineEdge;
-				if (Connection.Road->GetJunctionSideLineEdge(Connection.Endpoint, AppliedConnection->TrimDistance, EdgePointIndex == 0, LineEdge))
-				{
-					BoundarySample.LineEdges.Add(ConnectionIndex, LineEdge);
-				}
-			}
-			if (EdgeGeometry.bHasSideFlaps && EdgePointIndex == 0)
-			{
-				BoundarySample.FlapPoint = EdgeGeometry.LeftFlapPoint;
-				BoundarySample.bHasFlapPoint = true;
-			}
-			else if (EdgeGeometry.bHasSideFlaps
-				&& EdgePointIndex == EdgeGeometry.SurfacePoints.Num() - 1)
-			{
-				BoundarySample.FlapPoint = EdgeGeometry.RightFlapPoint;
-				BoundarySample.bHasFlapPoint = true;
-			}
+			CenterSupportSample.Location += SurfacePoint;
 		}
+		CenterSupportSample.Location /= EdgeGeometry.SurfacePoints.Num();
+		CenterSupportSample.Direction = EdgeGeometry.Direction;
+
+		FJunctionPortal& Portal = Portals.AddDefaulted_GetRef();
+		Portal.ConnectionIndex = ConnectionIndex;
+		Portal.Road = Connection.Road;
+		Portal.Endpoint = Connection.Endpoint;
+		Portal.TrimDistance = AppliedConnection->TrimDistance;
+		Portal.SurfacePoints = MoveTemp(EdgeGeometry.SurfacePoints);
+		Portal.Direction = EdgeGeometry.Direction;
+		Portal.LeftFlapPoint = EdgeGeometry.LeftFlapPoint;
+		Portal.RightFlapPoint = EdgeGeometry.RightFlapPoint;
+		Portal.bHasSideFlaps = EdgeGeometry.bHasSideFlaps;
 	}
 
-	if (BoundarySamples.Num() < 3)
+	if (Portals.Num() < 2)
 	{
 		JunctionMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		return false;
 	}
 
-	FVector Center = ProjectToTerrain(GetActorLocation());
+	FVector CenterCandidate = GetActorLocation();
+	float XX = 0.0f;
+	float XY = 0.0f;
+	float YY = 0.0f;
+	float BX = 0.0f;
+	float BY = 0.0f;
+	int32 ValidCenterDirections = 0;
+	for (const FJunctionPortal& Portal : Portals)
+	{
+		FVector PortalCenter = FVector::ZeroVector;
+		for (const FVector& Point : Portal.SurfacePoints)
+		{
+			PortalCenter += Point;
+		}
+		PortalCenter /= Portal.SurfacePoints.Num();
+		const FVector2D Direction(
+			Portal.Direction.X,
+			Portal.Direction.Y);
+		if (Direction.SizeSquared() <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+		const FVector2D Normal(-Direction.Y, Direction.X);
+		const float Projection = FVector2D::DotProduct(
+			Normal,
+			FVector2D(PortalCenter));
+		XX += Normal.X * Normal.X;
+		XY += Normal.X * Normal.Y;
+		YY += Normal.Y * Normal.Y;
+		BX += Normal.X * Projection;
+		BY += Normal.Y * Projection;
+		++ValidCenterDirections;
+	}
+	const float CenterDeterminant = XX * YY - XY * XY;
+	if (ValidCenterDirections >= 2
+		&& FMath::Abs(CenterDeterminant) > KINDA_SMALL_NUMBER)
+	{
+		CenterCandidate.X = (BX * YY - BY * XY) / CenterDeterminant;
+		CenterCandidate.Y = (XX * BY - XY * BX) / CenterDeterminant;
+	}
+
+	FVector Center = CenterCandidate;
+	float CenterTerrainHeight = -TNumericLimits<float>::Max();
+	FHitResult CenterTerrainHit;
+	const bool bHasCenterTerrainHit = bAlignToTerrain
+		&& TraceTerrain(CenterCandidate, CenterTerrainHit);
+	if (bHasCenterTerrainHit)
+	{
+		const FVector CenterTerrainPoint = CenterTerrainHit.ImpactPoint
+			+ CenterTerrainHit.ImpactNormal.GetSafeNormal() * SurfaceOffset;
+		Center = CenterTerrainPoint;
+		CenterTerrainHeight = CenterTerrainPoint.Z;
+	}
 	if (!CenterSupportSamples.IsEmpty())
 	{
 		float WeightedHeight = 0.0f;
@@ -689,20 +750,101 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 			Center.Z = FMath::Lerp(Center.Z, GroundHeightSum / GroundHitCount, FMath::Clamp(InteriorSmoothingStrength, 0.0f, 1.0f));
 		}
 	}
-	BoundarySamples.Sort(
-		[Center](const FBoundarySample& First, const FBoundarySample& Second)
+	if (bHasCenterTerrainHit)
+	{
+		// Road-slope extrapolation can undercut the landscape at the convergence
+		// point on a shallow grade; never let the center sink below its terrain sample.
+		Center.Z = FMath::Max(Center.Z, CenterTerrainHeight);
+	}
+	TArray<FBoundarySample> BoundarySamples;
+	Portals.Sort(
+		[Center](const FJunctionPortal& First, const FJunctionPortal& Second)
 		{
+			FVector FirstCenter = FVector::ZeroVector;
+			for (const FVector& Point : First.SurfacePoints)
+			{
+				FirstCenter += Point;
+			}
+			FirstCenter /= First.SurfacePoints.Num();
+			FVector SecondCenter = FVector::ZeroVector;
+			for (const FVector& Point : Second.SurfacePoints)
+			{
+				SecondCenter += Point;
+			}
+			SecondCenter /= Second.SurfacePoints.Num();
 			const float FirstAngle = FMath::Atan2(
-				First.Location.Y - Center.Y,
-				First.Location.X - Center.X);
+				FirstCenter.Y - Center.Y,
+				FirstCenter.X - Center.X);
 			const float SecondAngle = FMath::Atan2(
-				Second.Location.Y - Center.Y,
-				Second.Location.X - Center.X);
+				SecondCenter.Y - Center.Y,
+				SecondCenter.X - Center.X);
 			return !FMath::IsNearlyEqual(FirstAngle, SecondAngle)
 				? FirstAngle < SecondAngle
-				: FVector::DistSquared(First.Location, Center)
-					< FVector::DistSquared(Second.Location, Center);
+				: First.ConnectionIndex < Second.ConnectionIndex;
 		});
+	for (const FJunctionPortal& Portal : Portals)
+	{
+		// Orient each portal along the counter-clockwise perimeter. The road
+		// surface vertices remain in their authored order inside the portal;
+		// only the portal as a whole may be reversed.
+		FVector PortalCenter = FVector::ZeroVector;
+		for (const FVector& Point : Portal.SurfacePoints)
+		{
+			PortalCenter += Point;
+		}
+		PortalCenter /= Portal.SurfacePoints.Num();
+		const FVector2D Radial(
+			PortalCenter.X - Center.X,
+			PortalCenter.Y - Center.Y);
+		const FVector2D PortalRadial = Radial.SizeSquared() > KINDA_SMALL_NUMBER
+			? Radial.GetSafeNormal()
+			: FVector2D(Portal.Direction.X, Portal.Direction.Y).GetSafeNormal();
+		const FVector2D CounterClockwiseTangent(
+			-PortalRadial.Y,
+			PortalRadial.X);
+		const FVector2D PortalSpan(
+			Portal.SurfacePoints.Last().X - Portal.SurfacePoints[0].X,
+			Portal.SurfacePoints.Last().Y - Portal.SurfacePoints[0].Y);
+		const bool bReversePortal = FVector2D::DotProduct(
+			PortalSpan,
+			CounterClockwiseTangent) < 0.0f;
+		for (int32 PortalPointIndex = 0;
+			PortalPointIndex < Portal.SurfacePoints.Num();
+			++PortalPointIndex)
+		{
+			const int32 OriginalPointIndex = bReversePortal
+				? Portal.SurfacePoints.Num() - 1 - PortalPointIndex
+				: PortalPointIndex;
+			FBoundarySample& BoundarySample = BoundarySamples.AddDefaulted_GetRef();
+			BoundarySample.Location = Portal.SurfacePoints[OriginalPointIndex];
+			BoundarySample.ConnectionIndex = Portal.ConnectionIndex;
+			if (PortalPointIndex == 0 || PortalPointIndex == Portal.SurfacePoints.Num() - 1)
+			{
+				const bool bOriginalLeft = OriginalPointIndex == 0;
+				FProceduralRoadLineEdge LineEdge;
+				if (Portal.Road->GetJunctionSideLineEdge(
+					Portal.Endpoint,
+					Portal.TrimDistance,
+					bOriginalLeft,
+					LineEdge))
+				{
+					BoundarySample.LineEdges.Add(Portal.ConnectionIndex, LineEdge);
+				}
+			}
+			if (Portal.bHasSideFlaps && OriginalPointIndex == 0)
+			{
+				BoundarySample.FlapPoint = Portal.LeftFlapPoint;
+				BoundarySample.bHasFlapPoint = true;
+			}
+			else if (Portal.bHasSideFlaps
+				&& OriginalPointIndex == Portal.SurfacePoints.Num() - 1)
+			{
+				BoundarySample.FlapPoint = Portal.RightFlapPoint;
+				BoundarySample.bHasFlapPoint = true;
+			}
+		}
+	}
+
 	auto MergeFlapPoints = [](FBoundarySample& Target, const FBoundarySample& Source)
 	{
 		Target.LineEdges.Append(Source.LineEdges);
@@ -841,10 +983,29 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 				FVector2D(Center),
 				FVector2D(BoundaryPoint.Location)));
 	}
-	const int32 RingCount = FMath::Max(
-		1,
-		FMath::CeilToInt(MaximumRadius / SampleSpacing));
-	Vertices.Reserve(1 + RingCount * BoundaryPoints.Num());
+	const int32 BoundaryPointCount = BoundaryPoints.Num();
+	const int32 InteriorPointCount = FMath::Min(BoundaryPointCount, 24);
+	const float InteriorRingSpacing = FMath::Max(SampleSpacing * 4.0f, 300.0f);
+	const int32 RingCount = FMath::Clamp(
+		FMath::CeilToInt(MaximumRadius / InteriorRingSpacing),
+		2,
+		4);
+	const int32 BoundaryStart =
+		1 + (RingCount - 1) * InteriorPointCount;
+	TArray<float> BoundaryDistances;
+	BoundaryDistances.SetNum(BoundaryPointCount + 1);
+	float BoundaryPerimeter = 0.0f;
+	for (int32 BoundaryIndex = 0;
+		BoundaryIndex < BoundaryPointCount;
+		++BoundaryIndex)
+	{
+		BoundaryDistances[BoundaryIndex] = BoundaryPerimeter;
+		BoundaryPerimeter += FVector2D::Distance(
+			FVector2D(BoundaryPoints[BoundaryIndex].Location),
+			FVector2D(BoundaryPoints[(BoundaryIndex + 1) % BoundaryPointCount].Location));
+	}
+	BoundaryDistances[BoundaryPointCount] = BoundaryPerimeter;
+	Vertices.Reserve(BoundaryStart + BoundaryPointCount);
 	UVs.Reserve(Vertices.Max());
 
 	Vertices.Add(GetActorTransform().InverseTransformPosition(Center));
@@ -853,60 +1014,143 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 	UVs.Add(FVector2D(
 		Center.X / FMath::Max(UVWorldSize.X, 1.0f),
 		Center.Y / FMath::Max(UVWorldSize.Y, 1.0f)));
-	for (int32 RingIndex = 1; RingIndex <= RingCount; ++RingIndex)
+	for (int32 RingIndex = 1; RingIndex < RingCount; ++RingIndex)
 	{
 		const float RingAlpha = static_cast<float>(RingIndex) / RingCount;
-		for (const FBoundarySample& BoundaryPoint : BoundaryPoints)
+		for (int32 InteriorPointIndex = 0;
+			InteriorPointIndex < InteriorPointCount;
+			++InteriorPointIndex)
 		{
+			const float BoundaryDistance = BoundaryPerimeter
+				* static_cast<float>(InteriorPointIndex) / InteriorPointCount;
+			int32 BoundaryIndex = 0;
+			while (BoundaryIndex + 1 < BoundaryPointCount
+				&& BoundaryDistances[BoundaryIndex + 1] < BoundaryDistance)
+			{
+				++BoundaryIndex;
+			}
+			const int32 NextBoundaryIndex =
+				(BoundaryIndex + 1) % BoundaryPointCount;
+			const FBoundarySample& BoundaryPoint = BoundaryPoints[BoundaryIndex];
+			const FBoundarySample& NextBoundaryPoint =
+				BoundaryPoints[NextBoundaryIndex];
+			const float BoundarySegmentLength =
+				BoundaryDistances[BoundaryIndex + 1] - BoundaryDistances[BoundaryIndex];
+			const float BoundaryAlpha = BoundarySegmentLength > KINDA_SMALL_NUMBER
+				? (BoundaryDistance - BoundaryDistances[BoundaryIndex]) / BoundarySegmentLength
+				: 0.0f;
+			const FVector BoundaryLocation = FMath::Lerp(
+				BoundaryPoint.Location,
+				NextBoundaryPoint.Location,
+				BoundaryAlpha);
 			const FVector DesiredPoint = FMath::Lerp(
 				Center,
-				BoundaryPoint.Location,
+				BoundaryLocation,
 				RingAlpha);
-			FVector WorldPoint = BoundaryPoint.Location;
-			if (RingIndex != RingCount)
-			{
-				WorldPoint = ProjectToTerrain(DesiredPoint);
-				const float SupportedHeight = FMath::Lerp(
-					Center.Z,
-					BoundaryPoint.Location.Z,
-					RingAlpha);
-				const float TerrainInfluence =
-					4.0f * RingAlpha * (1.0f - RingAlpha);
-				const float AllowedDeviation =
-					MaximumInteriorTerrainDeviation * TerrainInfluence;
-				WorldPoint.Z = FMath::Clamp(
-					WorldPoint.Z,
-					SupportedHeight - AllowedDeviation,
-					SupportedHeight + AllowedDeviation);
-			}
+			FVector WorldPoint = DesiredPoint;
+			const float SupportedHeight = FMath::Lerp(
+				Center.Z,
+				BoundaryLocation.Z,
+				RingAlpha);
+			const float TerrainInfluence =
+				4.0f * RingAlpha * (1.0f - RingAlpha);
+			const float AllowedTerrainRaise =
+				MaximumInteriorTerrainDeviation * TerrainInfluence;
+			// The terrain sample may lift the patch toward a ridge, but an
+			// isolated depression must not pull it below the edge-supported
+			// surface and make the junction disappear into the ground.
+			const FVector TerrainPoint = ProjectToTerrain(DesiredPoint);
+			WorldPoint.Z = FMath::Clamp(
+				TerrainPoint.Z,
+				SupportedHeight,
+				SupportedHeight + AllowedTerrainRaise);
 			Vertices.Add(GetActorTransform().InverseTransformPosition(WorldPoint));
 			SupportedHeights.Add(DesiredPoint.Z);
-			AllowedDeviations.Add(RingIndex == RingCount ? 0.0f : MaximumInteriorTerrainDeviation * 4.0f * RingAlpha * (1.0f - RingAlpha));
+			AllowedDeviations.Add(AllowedTerrainRaise);
 			UVs.Add(FVector2D(
 				WorldPoint.X / FMath::Max(UVWorldSize.X, 1.0f),
 				WorldPoint.Y / FMath::Max(UVWorldSize.Y, 1.0f)));
 		}
 	}
+	for (const FBoundarySample& BoundaryPoint : BoundaryPoints)
+	{
+		Vertices.Add(GetActorTransform().InverseTransformPosition(BoundaryPoint.Location));
+		SupportedHeights.Add(BoundaryPoint.Location.Z);
+		AllowedDeviations.Add(0.0f);
+		UVs.Add(FVector2D(
+			BoundaryPoint.Location.X / FMath::Max(UVWorldSize.X, 1.0f),
+			BoundaryPoint.Location.Y / FMath::Max(UVWorldSize.Y, 1.0f)));
+	}
 
-	for (int32 PointIndex = 0; PointIndex < BoundaryPoints.Num(); ++PointIndex)
+	for (int32 PointIndex = 0; PointIndex < InteriorPointCount; ++PointIndex)
 	{
 		Triangles.Add(0);
 		Triangles.Add(PointIndex + 1);
-		Triangles.Add(((PointIndex + 1) % BoundaryPoints.Num()) + 1);
+		Triangles.Add(((PointIndex + 1) % InteriorPointCount) + 1);
 	}
-	for (int32 RingIndex = 1; RingIndex < RingCount; ++RingIndex)
+	for (int32 RingIndex = 1; RingIndex < RingCount - 1; ++RingIndex)
 	{
-		const int32 InnerRingStart = 1 + (RingIndex - 1) * BoundaryPoints.Num();
-		const int32 OuterRingStart = 1 + RingIndex * BoundaryPoints.Num();
-		for (int32 PointIndex = 0; PointIndex < BoundaryPoints.Num(); ++PointIndex)
+		const int32 InnerRingStart = 1 + (RingIndex - 1) * InteriorPointCount;
+		const int32 OuterRingStart = 1 + RingIndex * InteriorPointCount;
+		for (int32 PointIndex = 0; PointIndex < InteriorPointCount; ++PointIndex)
 		{
-			const int32 NextPointIndex = (PointIndex + 1) % BoundaryPoints.Num();
+			const int32 NextPointIndex = (PointIndex + 1) % InteriorPointCount;
 			Triangles.Add(InnerRingStart + PointIndex);
 			Triangles.Add(OuterRingStart + PointIndex);
 			Triangles.Add(OuterRingStart + NextPointIndex);
 			Triangles.Add(InnerRingStart + PointIndex);
 			Triangles.Add(OuterRingStart + NextPointIndex);
 			Triangles.Add(InnerRingStart + NextPointIndex);
+		}
+	}
+	int32 InnerPointIndex = 0;
+	int32 OuterPointIndex = 0;
+	while (InnerPointIndex < InteriorPointCount
+		|| OuterPointIndex < BoundaryPointCount)
+	{
+		const int32 NextInnerPointIndex =
+			(InnerPointIndex + 1) % InteriorPointCount;
+		const int32 NextOuterPointIndex =
+			(OuterPointIndex + 1) % BoundaryPointCount;
+		const float NextInnerProgress =
+			InnerPointIndex < InteriorPointCount
+				? static_cast<float>(InnerPointIndex + 1) / InteriorPointCount
+				: TNumericLimits<float>::Max();
+		const float NextOuterProgress =
+			OuterPointIndex < BoundaryPointCount
+				? BoundaryDistances[OuterPointIndex + 1] / BoundaryPerimeter
+				: TNumericLimits<float>::Max();
+		const int32 InnerVertex =
+			1 + (RingCount - 2) * InteriorPointCount
+			+ InnerPointIndex % InteriorPointCount;
+		const int32 OuterVertex =
+			BoundaryStart + OuterPointIndex % BoundaryPointCount;
+		if (InnerPointIndex < InteriorPointCount
+			&& OuterPointIndex < BoundaryPointCount
+			&& FMath::IsNearlyEqual(NextInnerProgress, NextOuterProgress))
+		{
+			Triangles.Add(InnerVertex);
+			Triangles.Add(OuterVertex);
+			Triangles.Add(BoundaryStart + NextOuterPointIndex);
+			Triangles.Add(InnerVertex);
+			Triangles.Add(BoundaryStart + NextOuterPointIndex);
+			Triangles.Add(1 + (RingCount - 2) * InteriorPointCount + NextInnerPointIndex);
+			++InnerPointIndex;
+			++OuterPointIndex;
+		}
+		else if (NextInnerProgress < NextOuterProgress)
+		{
+			Triangles.Add(InnerVertex);
+			Triangles.Add(OuterVertex);
+			Triangles.Add(1 + (RingCount - 2) * InteriorPointCount + NextInnerPointIndex);
+			++InnerPointIndex;
+		}
+		else
+		{
+			Triangles.Add(InnerVertex);
+			Triangles.Add(OuterVertex);
+			Triangles.Add(BoundaryStart + NextOuterPointIndex);
+			++OuterPointIndex;
 		}
 	}
 
@@ -931,7 +1175,7 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 		for (int32 Iteration = 0; Iteration < FMath::Clamp(InteriorSmoothingIterations, 0, 16); ++Iteration)
 		{
 			TArray<float> Smoothed = Residuals;
-			for (int32 Index = 1; Index < Vertices.Num() - BoundaryPoints.Num(); ++Index)
+			for (int32 Index = 1; Index < BoundaryStart; ++Index)
 			{
 				float WeightedResidual = 0.0f;
 				float TotalWeight = 0.0f;
@@ -948,7 +1192,7 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 			}
 			Residuals = MoveTemp(Smoothed);
 		}
-		for (int32 Index = 1; Index < Vertices.Num() - BoundaryPoints.Num(); ++Index)
+		for (int32 Index = 1; Index < BoundaryStart; ++Index)
 		{
 			FVector WorldPoint = GetActorTransform().TransformPosition(Vertices[Index]);
 			WorldPoint.Z = SupportedHeights[Index] + Residuals[Index];
@@ -1003,7 +1247,7 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 	if (GroundBlendWidth > KINDA_SMALL_NUMBER)
 	{
 		TArray<AProceduralRoadJunctionActor*> NearbyJunctions;
-		GatherNearbyJunctions(NearbyJunctions);
+		GatherNearbyJunctions(Center, NearbyJunctions);
 		TArray<FVector> BlendVertices;
 		TArray<int32> BlendTriangles;
 		TArray<FVector2D> BlendUVs;
@@ -1032,6 +1276,7 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 				const FVector DesiredOuterPoint =
 					BoundaryPoint.Location + OutwardDirection * GroundBlendWidth;
 				OuterPoint = ClampBlendPointToNearbyJunctions(
+					Center,
 					BoundaryPoint.Location,
 					DesiredOuterPoint,
 					NearbyJunctions);
@@ -1108,6 +1353,7 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 					BoundaryPoints[PointIndex].Location
 					+ FMath::Lerp(StartOffset, EndOffset, Alpha);
 				FVector OuterPoint = ClampBlendPointToNearbyJunctions(
+					Center,
 					BoundaryPoints[PointIndex].Location,
 					DesiredOuterPoint,
 					NearbyJunctions);
@@ -1118,8 +1364,11 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 			}
 		}
 
-		for (const FVector& OuterPoint : BlendOuterPoints)
+		for (int32 PointIndex = 0;
+			PointIndex < BlendOuterPoints.Num();
+			++PointIndex)
 		{
+			const FVector& OuterPoint = BlendOuterPoints[PointIndex];
 			BlendVertices.Add(GetActorTransform().InverseTransformPosition(OuterPoint));
 			BlendUVs.Add(FVector2D(
 				OuterPoint.X / FMath::Max(UVWorldSize.X, 1.0f),
@@ -1253,8 +1502,6 @@ bool AProceduralRoadJunctionActor::GenerateJunctionPatch()
 		TArray<FVector> ConvexVertices;
 		const FVector LocalDown = GetActorTransform().InverseTransformVectorNoScale(
 			-FVector::UpVector * CollisionThickness);
-		const int32 BoundaryStart =
-			1 + (RingCount - 1) * BoundaryPoints.Num();
 		for (int32 PointIndex = 0; PointIndex < BoundaryPoints.Num(); ++PointIndex)
 		{
 			ConvexVertices.Add(Vertices[BoundaryStart + PointIndex]);
@@ -1288,6 +1535,12 @@ void AProceduralRoadJunctionActor::GenerateCornerLine(const FProceduralRoadLineE
 	}
 	auto ProjectToPatch = [&](FVector& Point, float Offset) -> bool
 	{
+		bool bFoundSurface = false;
+		float BestHeightError = TNumericLimits<float>::Max();
+		float BestSurfaceZ = 0.0f;
+		// A coarse radial patch can have overlapping XY triangles at a
+		// concave edge. Select the triangle closest to the unprojected road
+		// line height instead of depending on triangle insertion order.
 		for (int32 Index = 0; Index < SurfaceTriangles.Num(); Index += 3)
 		{
 			const FVector AB = WorldSurface[SurfaceTriangles[Index + 1]] - WorldSurface[SurfaceTriangles[Index]];
@@ -1302,11 +1555,24 @@ void AProceduralRoadJunctionActor::GenerateCornerLine(const FProceduralRoadLineE
 			const double V = (AB.X * AP.Y - AB.Y * AP.X) / Denominator;
 			if (U >= -0.0001 && V >= -0.0001 && U + V <= 1.0001)
 			{
-				Point.Z = WorldSurface[SurfaceTriangles[Index]].Z + U * AB.Z + V * AC.Z + Offset;
-				return true;
+				const float SurfaceZ = WorldSurface[SurfaceTriangles[Index]].Z
+					+ U * AB.Z
+					+ V * AC.Z;
+				const float HeightError = FMath::Abs(SurfaceZ - Point.Z);
+				if (!bFoundSurface || HeightError < BestHeightError)
+				{
+					bFoundSurface = true;
+					BestHeightError = HeightError;
+					BestSurfaceZ = SurfaceZ;
+				}
 			}
 		}
-		return false;
+		if (!bFoundSurface)
+		{
+			return false;
+		}
+		Point.Z = BestSurfaceZ + Offset;
+		return true;
 	};
 
 	const int32 SegmentCount = FMath::Max(2, FMath::CeilToInt(SpanLength * 1.7f / FMath::Max(EdgeLineSampleSpacing, 10.0f)) / 2 * 2);
@@ -1530,7 +1796,7 @@ void AProceduralRoadJunctionActor::QueueEditorRebuild()
 void AProceduralRoadJunctionActor::QueueNearbyJunctionRebuilds()
 {
 	TArray<AProceduralRoadJunctionActor*> NearbyJunctions;
-	GatherNearbyJunctions(NearbyJunctions);
+	GatherNearbyJunctions(GetActorLocation(), NearbyJunctions);
 	for (AProceduralRoadJunctionActor* NearbyJunction : NearbyJunctions)
 	{
 		NearbyJunction->QueueEditorRebuild();

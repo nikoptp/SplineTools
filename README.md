@@ -143,9 +143,11 @@ load the authored roadside cache without rebuilding it or tracing the landscape.
 ## Road Intersections
 
 Place an `AProceduralRoadJunctionActor` at the intersection center and set its
-endpoint search radius and automatic trim distance. It discovers nearby road
-spline start/end points, claims the available endpoints, trims the affected road
-ends, and builds a terrain-conforming patch from the resulting road-edge pairs.
+endpoint search radius and automatic trim distance. **Road Mouth Padding** adds a
+second, shared offset before each connected road reaches the patch, leaving room
+for a rounded transition. It discovers nearby road spline start/end points,
+claims the available endpoints, trims the affected road ends, and builds a
+terrain-conforming patch from the resulting road-edge pairs.
 The patch uses world-space UVs and simple convex collision. A road endpoint can
 be owned by only one junction at a time, preventing competing trims.
 If no junction material is assigned, the patch uses the road material occurring
@@ -163,15 +165,24 @@ roads are rebuilt. **Rebuild Dirty** remains incremental for roads but always
 refreshes every managed junction cache; **Rebuild All** refreshes both complete
 sets. Both operations are geometrically idempotent.
 
-Junction surfaces use terrain-sampled radial rings instead of one large center
-fan. Each road first finishes rebuilding its trim, then the junction copies the
+Junction surfaces use a coarse interior radial mesh with a detailed perimeter
+instead of a dense radial grid. Each road first finishes rebuilding its trim, then the junction copies the
 actual serialized surface-row vertices from that road's endpoint mesh. This
 keeps the rendered meshes on exactly the same seam instead of independently
 resampling the spline. The center height is extrapolated from the connected road
 approaches rather than taken from one terrain trace. Inner rings blend from that
 road-supported center to the exact seams and constrain terrain displacement to
 **Maximum Interior Terrain Deviation** (50 cm by default), preventing terrain
-holes from collapsing the patch. The embedded perimeter skirt also copies each
+holes from collapsing the patch. A direct center terrain sample is retained as
+a lower bound after road-slope estimation, so shallow angled terrain cannot
+sink the center below the landscape. Road-mouth cross-sections are treated as
+indivisible portals and ordered as complete segments before the perimeter
+connectors are generated, so road vertices cannot be interleaved by a global
+angle sort. The interior uses at most 24 angular samples and four total radial
+layers with coarser spacing while preserving every perimeter sample at the road mouths. Junction
+surface and skirt UVs remain planar world-space UVs across the patch, keeping
+texture density uniform and avoiding a radial pinch at the center of multi-road
+junctions. The embedded perimeter skirt also copies each
 road's actual side-flap corner vertices, preserves both flap anchors at shared
 corners, and uses the dominant connected-road flap material. Terrain-facing skirt spans
 are sampled independently at **Ground Blend Sample Spacing** (75 cm by default),
@@ -187,8 +198,10 @@ stop at the junction-center bisector, and managed neighboring junctions rebuild
 together when either changes. Tune **Terrain Sample Spacing**, **Ground Blend
 Width**, **Ground Blend Embed Depth**, **Nearby Junction Search Radius**, and
 **Minimum Road Length Between Junctions** on the junction class defaults. Use
-**Ground Blend Sample Spacing** to trade skirt smoothness for vertex count and
-**Maximum Interior Terrain Deviation** to control interior ground conformity.
+**Road Mouth Padding** (150 cm by default) to move connected road ends farther
+from the patch and leave a wider rounded transition. Use **Ground Blend Sample
+Spacing** to trade skirt smoothness for vertex count and **Maximum Interior
+Terrain Deviation** to control interior ground conformity.
 After upgrading an existing map, restart the editor and run **Rebuild All** once
 to replace previously cached center-fan junction meshes.
 

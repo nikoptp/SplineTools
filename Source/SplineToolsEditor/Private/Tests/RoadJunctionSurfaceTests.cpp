@@ -38,6 +38,7 @@ namespace
 			Junction = World->SpawnActor<AProceduralRoadJunctionActor>();
 			SetBool(Junction, TEXT("bAlignToTerrain"), false);
 			SetBool(Junction, TEXT("bGenerateCollision"), false);
+			SetFloat(Junction, TEXT("RoadMouthPadding"), 0.0f);
 			for (const FVector& End : {FVector(-4000, 0, 0), FVector(4000, 0, 0), FVector(0, 4000, 0)})
 			{
 				AProceduralRoadActor* Road = World->SpawnActor<AProceduralRoadActor>();
@@ -68,12 +69,13 @@ namespace
 
 		UProceduralMeshComponent* Mesh() const { return Junction->FindComponentByClass<UProceduralMeshComponent>(); }
 
-		void AddGroundBox(const FVector& Location, const FVector& Extent)
+		void AddGroundBox(const FVector& Location, const FVector& Extent, const FRotator& Rotation = FRotator::ZeroRotator)
 		{
 			AActor* Ground = World->SpawnActor<AActor>();
 			UBoxComponent* Box = NewObject<UBoxComponent>(Ground);
 			Ground->SetRootComponent(Box);
 			Ground->SetActorLocation(Location);
+			Ground->SetActorRotation(Rotation);
 			Box->SetBoxExtent(Extent);
 			Box->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 			Box->SetCollisionResponseToAllChannels(ECR_Ignore);
@@ -95,6 +97,7 @@ namespace
 		}
 		return Height;
 	}
+
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJunctionGroundSmoothingTest, "SplineTools.Junction.DenseSmoothedGround", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -103,9 +106,9 @@ bool FJunctionGroundSmoothingTest::RunTest(const FString& Parameters)
 {
 	FJunctionFixture Fixture;
 	const int32 DenseCount = Fixture.Mesh()->GetProcMeshSection(0)->ProcVertexBuffer.Num();
-	SetFloat(Fixture.Junction, TEXT("TerrainSampleSpacing"), 150);
+	SetFloat(Fixture.Junction, TEXT("TerrainSampleSpacing"), 300);
 	Fixture.Junction->RebuildJunction();
-	TestTrue(TEXT("New default increases surface vertex density"), DenseCount > Fixture.Mesh()->GetProcMeshSection(0)->ProcVertexBuffer.Num());
+	TestTrue(TEXT("Larger sample spacing reduces interior surface density"), DenseCount > Fixture.Mesh()->GetProcMeshSection(0)->ProcVertexBuffer.Num());
 	SetFloat(Fixture.Junction, TEXT("TerrainSampleSpacing"), 75);
 	SetBool(Fixture.Junction, TEXT("bAlignToTerrain"), true);
 	Fixture.AddGroundBox(FVector(0, 0, -10), FVector(5000, 5000, 10));
@@ -133,6 +136,120 @@ bool FJunctionGroundSmoothingTest::RunTest(const FString& Parameters)
 	for (int32 Index = 0; Index < Baked.Num(); ++Index)
 	{
 		TestTrue(TEXT("Repeated terrain rebuild is geometrically stable"), Fixture.Mesh()->GetProcMeshSection(0)->ProcVertexBuffer[Index].Position.Equals(Baked[Index].Position, 0.01f));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJunctionLandscapeCenterTest, "SplineTools.Junction.LandscapeCenter", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJunctionLandscapeCenterTest::RunTest(const FString& Parameters)
+{
+	FJunctionFixture Fixture;
+	SetBool(Fixture.Junction, TEXT("bAlignToTerrain"), true);
+	SetFloat(Fixture.Junction, TEXT("InteriorSmoothingStrength"), 1.0f);
+	Fixture.Junction->SetActorLocation(FVector(900, 900, 1000));
+	Fixture.AddGroundBox(FVector(0, 0, -10), FVector(5000, 5000, 10));
+	Fixture.Junction->RebuildJunction();
+
+	FProcMeshSection* Section = Fixture.Mesh()->GetProcMeshSection(0);
+	TestNotNull(TEXT("Junction generated a surface section"), Section);
+	if (!Section)
+	{
+		return false;
+	}
+
+	const FVector Center = Fixture.Mesh()->GetComponentTransform().TransformPosition(
+		Section->ProcVertexBuffer[0].Position);
+	TestTrue(
+		TEXT("Junction center follows the connected road convergence"),
+		Center.Equals(FVector(0, 0, 3), 0.01f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJunctionTerrainDepressionTest, "SplineTools.Junction.EdgeSupportedSurface", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJunctionTerrainDepressionTest::RunTest(const FString& Parameters)
+{
+	FJunctionFixture Fixture;
+	SetBool(Fixture.Junction, TEXT("bAlignToTerrain"), true);
+	SetFloat(Fixture.Junction, TEXT("InteriorSmoothingStrength"), 0.0f);
+	Fixture.AddGroundBox(FVector(0, 0, -500), FVector(500, 500, 10));
+	Fixture.Junction->RebuildJunction();
+
+	FProcMeshSection* Section = Fixture.Mesh()->GetProcMeshSection(0);
+	TestNotNull(TEXT("Junction generated a surface section"), Section);
+	if (!Section)
+	{
+		return false;
+	}
+	TestTrue(
+		TEXT("Junction center stays on the edge-supported plane over a depression"),
+		Fixture.Mesh()->GetComponentTransform().TransformPosition(
+			Section->ProcVertexBuffer[0].Position).Z >= -0.01);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJunctionCenterTerrainSupportTest, "SplineTools.Junction.CenterTerrainSupport", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJunctionCenterTerrainSupportTest::RunTest(const FString& Parameters)
+{
+	FJunctionFixture Fixture;
+	SetBool(Fixture.Junction, TEXT("bAlignToTerrain"), true);
+	SetFloat(Fixture.Junction, TEXT("InteriorSmoothingStrength"), 0.0f);
+	Fixture.AddGroundBox(FVector(0, 0, 25), FVector(5000, 5000, 25), FRotator(1.0f, 0.0f, 0.0f));
+	Fixture.Junction->RebuildJunction();
+
+	FProcMeshSection* Section = Fixture.Mesh()->GetProcMeshSection(0);
+	TestNotNull(TEXT("Junction generated a surface section"), Section);
+	if (!Section)
+	{
+		return false;
+	}
+
+	const FVector Center = Fixture.Mesh()->GetComponentTransform().TransformPosition(
+		Section->ProcVertexBuffer[0].Position);
+	TestTrue(TEXT("Junction center stays above the angled terrain"), Center.Z > 25.0f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJunctionRoadMouthPaddingTest, "SplineTools.Junction.RoadMouthPadding", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJunctionRoadMouthPaddingTest::RunTest(const FString& Parameters)
+{
+	FJunctionFixture Fixture;
+	SetFloat(Fixture.Junction, TEXT("RoadMouthPadding"), 150.0f);
+	Fixture.Junction->RebuildJunction();
+
+	for (const FProceduralRoadJunctionConnection& Connection : Fixture.Connections)
+	{
+		float TrimDistance = 0.0f;
+		TestTrue(
+			TEXT("Connected road exposes its junction trim"),
+			Connection.Road->GetJunctionTrimDistance(
+				Connection.Endpoint,
+				TrimDistance));
+		TestEqual(TEXT("Road mouth starts after the configured padding"), TrimDistance, 750.0f);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FJunctionSurfaceUVTest, "SplineTools.Junction.SurfaceUVs", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FJunctionSurfaceUVTest::RunTest(const FString& Parameters)
+{
+	FJunctionFixture Fixture;
+	FProcMeshSection* Section = Fixture.Mesh()->GetProcMeshSection(0);
+	TestNotNull(TEXT("Junction generated a surface section"), Section);
+	if (!Section)
+	{
+		return false;
+	}
+
+	for (const FProcMeshVertex& Vertex : Section->ProcVertexBuffer)
+	{
+		const FVector Position = Fixture.Mesh()->GetComponentTransform().TransformPosition(Vertex.Position);
+		const FVector2D ExpectedUV(Position.X / 400.0f, Position.Y / 400.0f);
+		TestTrue(TEXT("Junction surface keeps uniform planar UVs"), Vertex.UV0.Equals(ExpectedUV, 0.001f));
 	}
 	return true;
 }

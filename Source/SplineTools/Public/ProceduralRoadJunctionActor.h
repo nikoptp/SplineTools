@@ -80,11 +80,15 @@ private:
 	void SynchronizeRoadTrims();
 	void ReleaseRoadTrims();
 	bool IsConnectionConfigured(const FAppliedConnection& AppliedConnection) const;
+	float GetRequestedTrimDistance(
+		const FProceduralRoadJunctionConnection& Connection) const;
 	float GetEffectiveTrimDistance(
 		const FProceduralRoadJunctionConnection& Connection) const;
 	void GatherNearbyJunctions(
+		const FVector& JunctionCenter,
 		TArray<AProceduralRoadJunctionActor*>& OutJunctions) const;
 	FVector ClampBlendPointToNearbyJunctions(
+		const FVector& JunctionCenter,
 		const FVector& InnerPoint,
 		const FVector& DesiredOuterPoint,
 		const TArray<AProceduralRoadJunctionActor*>& NearbyJunctions) const;
@@ -121,6 +125,10 @@ private:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Discovery", meta = (ClampMin = "0.0", AllowPrivateAccess = "true"))
 	float AutomaticTrimDistance = 300.0f;
+
+	/** Extra distance between connected road mouths and the junction patch. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction|Geometry", meta = (ClampMin = "0.0", Units = "cm", AllowPrivateAccess = "true"))
+	float RoadMouthPadding = 150.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Road Junction", meta = (EditCondition = "!bAutoDiscoverRoadEndpoints", AllowPrivateAccess = "true"))
 	TArray<FProceduralRoadJunctionConnection> Connections;
